@@ -24,6 +24,9 @@ export interface PatternCount {
 
 export interface ScanResult {
   repoRoot: string;
+  repositorySource?: "local" | "remote";
+  repositoryInput?: string;
+  workspacePath?: string;
   remoteUrl?: string;
   generatedAt: string;
   commitsAnalyzed: number;

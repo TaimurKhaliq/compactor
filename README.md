@@ -33,6 +33,29 @@ compactor report
 
 ## Commands
 
+### `compactor analyze`
+
+Runs the full pipeline in one shot:
+
+```text
+scan -> mine -> generate -> report
+```
+
+```bash
+compactor analyze
+compactor analyze ../some-project
+compactor analyze https://github.com/org/repo.git
+compactor analyze https://github.com/org/repo.git --limit 100
+```
+
+When the target is a remote Git URL, Compactor clones it into:
+
+```text
+.compactor/workspaces/<safe-repo-name>
+```
+
+If that workspace already exists, Compactor runs `git pull --ff-only` before analysis. Generated output is written inside the checked-out target repository's own `.compactor/` folder.
+
 ### `compactor scan`
 
 Reads recent local git history, groups changed files by commit, classifies basic metadata, and writes `.compactor/cache/scan-result.json`.
@@ -41,6 +64,7 @@ Reads recent local git history, groups changed files by commit, classifies basic
 compactor scan --limit 50
 compactor scan --limit 100 --json
 compactor scan --repo ../some-project --limit 25
+compactor scan --repo https://github.com/org/repo.git --limit 50
 ```
 
 Captured metadata includes:
@@ -125,6 +149,7 @@ Project layout:
 ```text
 src/cli.ts
 src/git/history.ts
+src/git/repository.ts
 src/analysis/classifier.ts
 src/analysis/patternMiner.ts
 src/skills/skillGenerator.ts

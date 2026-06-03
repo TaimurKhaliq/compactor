@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { minePatterns } from "./analysis/patternMiner.js";
 import { scanRepository } from "./git/history.js";
 import { generateReport } from "./report/reportGenerator.js";
@@ -8,7 +8,7 @@ import { generateSkillDrafts } from "./skills/skillGenerator.js";
 import type { MiningResult, ScanResult } from "./types.js";
 
 interface CliOptions {
-  repoPath: string;
+  repo?: string;
   limit: number;
   json: boolean;
   help: boolean;
@@ -37,6 +37,9 @@ function main(): void {
       return;
     case "report":
       runReport(options);
+      return;
+    case "analyze":
+      runAnalyze(options);
       return;
     default:
       throw new Error(`Unknown command: ${command}`);
@@ -103,9 +106,39 @@ function runReport(options: CliOptions): void {
   console.log(report);
 }
 
+function runAnalyze(options: CliOptions): void {
+  const scan = scanAndCache(options);
+  const mining = mineAndCache(scan);
+  const generation = generateSkillDrafts(scan, mining);
+  writeCache(scan.repoRoot, "generation-result.json", generation);
+  const report = generateReport(scan, mining);
+  writeCache(scan.repoRoot, "report.txt", report);
+
+  if (options.json) {
+    printJson({
+      scan,
+      mining,
+      generation,
+      report
+    });
+    return;
+  }
+
+  console.log(report);
+  console.log(`Generated AGENTS draft: ${generation.agentsPath}`);
+  if (generation.skillFiles.length > 0) {
+    console.log("Generated skill drafts:");
+    for (const file of generation.skillFiles) {
+      console.log(`- ${file.path}`);
+    }
+  } else {
+    console.log("No skill drafts generated because no repeated candidates were found.");
+  }
+}
+
 function scanAndCache(options: CliOptions): ScanResult {
   const scan = scanRepository({
-    repoPath: options.repoPath,
+    repo: options.repo,
     limit: options.limit
   });
   writeCache(scan.repoRoot, "scan-result.json", scan);
@@ -120,7 +153,6 @@ function mineAndCache(scan: ScanResult): MiningResult {
 
 function parseOptions(args: string[]): CliOptions {
   const options: CliOptions = {
-    repoPath: process.cwd(),
     limit: DEFAULT_LIMIT,
     json: false,
     help: false
@@ -147,13 +179,13 @@ function parseOptions(args: string[]): CliOptions {
       if (!value) {
         throw new Error("--repo requires a path");
       }
-      options.repoPath = resolve(value);
+      options.repo = value;
       index += 1;
       continue;
     }
 
     if (arg.startsWith("--repo=")) {
-      options.repoPath = resolve(arg.slice("--repo=".length));
+      options.repo = arg.slice("--repo=".length);
       continue;
     }
 
@@ -172,7 +204,15 @@ function parseOptions(args: string[]): CliOptions {
       continue;
     }
 
-    throw new Error(`Unknown option: ${arg}`);
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    if (options.repo) {
+      throw new Error(`Unexpected positional argument: ${arg}`);
+    }
+
+    options.repo = arg;
   }
 
   return options;
@@ -205,12 +245,14 @@ function printHelp(): void {
   console.log(`compactor
 
 Usage:
+  compactor analyze [repo-url-or-path] [--limit 50] [--json]
   compactor scan [--limit 50] [--repo path] [--json]
   compactor mine [--limit 50] [--repo path] [--json]
   compactor generate [--limit 50] [--repo path] [--json]
   compactor report [--limit 50] [--repo path]
 
 Commands:
+  analyze   Run scan, mine, generate, and report in one shot
   scan      Read recent git history and cache commit metadata
   mine      Detect repeated development patterns and cache skill candidates
   generate  Generate .compactor/skills/*/SKILL.md and .compactor/AGENTS.md

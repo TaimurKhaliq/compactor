@@ -1,18 +1,25 @@
 import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
 import { classifyCommit, collectRepeatedPathPatterns } from "../analysis/classifier.js";
+import { prepareRepository } from "./repository.js";
 import type { RawCommit, ScanResult } from "../types.js";
 
 export interface ScanRepositoryOptions {
+  repo?: string;
   repoPath?: string;
+  cwd?: string;
+  workspaceBasePath?: string;
   limit?: number;
 }
 
 const DEFAULT_LIMIT = 50;
 
 export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult {
-  const requestedPath = resolve(options.repoPath ?? process.cwd());
-  const repoRoot = getRepoRoot(requestedPath);
+  const target = prepareRepository({
+    repo: options.repo ?? options.repoPath,
+    cwd: options.cwd,
+    workspaceBasePath: options.workspaceBasePath
+  });
+  const repoRoot = target.repoRoot;
   const limit = normalizeLimit(options.limit);
   const remoteUrl = getRemoteWebUrl(repoRoot);
   const rawCommits = readRawCommits(repoRoot, limit);
@@ -26,6 +33,9 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
 
   return {
     repoRoot,
+    repositorySource: target.source,
+    repositoryInput: target.input,
+    workspacePath: target.workspacePath,
     remoteUrl,
     generatedAt: new Date().toISOString(),
     commitsAnalyzed: commits.length,
