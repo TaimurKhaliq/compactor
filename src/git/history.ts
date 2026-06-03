@@ -1,0 +1,133 @@
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+import { classifyCommit, collectRepeatedPathPatterns } from "../analysis/classifier.js";
+import type { RawCommit, ScanResult } from "../types.js";
+
+export interface ScanRepositoryOptions {
+  repoPath?: string;
+  limit?: number;
+}
+
+const DEFAULT_LIMIT = 50;
+
+export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult {
+  const requestedPath = resolve(options.repoPath ?? process.cwd());
+  const repoRoot = getRepoRoot(requestedPath);
+  const limit = normalizeLimit(options.limit);
+  const remoteUrl = getRemoteWebUrl(repoRoot);
+  const rawCommits = readRawCommits(repoRoot, limit);
+  const commits = rawCommits.map((commit) => {
+    const metadata = classifyCommit(commit);
+    return {
+      ...metadata,
+      commitUrl: remoteUrl ? `${remoteUrl}/commit/${commit.hash}` : undefined
+    };
+  });
+
+  return {
+    repoRoot,
+    remoteUrl,
+    generatedAt: new Date().toISOString(),
+    commitsAnalyzed: commits.length,
+    commits,
+    repeatedPathPatterns: collectRepeatedPathPatterns(commits)
+  };
+}
+
+export function getRepoRoot(cwd: string): string {
+  try {
+    return runGit(["rev-parse", "--show-toplevel"], cwd).trim();
+  } catch (error) {
+    throw new Error(`Not a git repository: ${cwd}`);
+  }
+}
+
+function readRawCommits(repoRoot: string, limit: number): RawCommit[] {
+  const output = runGitOrEmpty(
+    ["log", `--max-count=${limit}`, "--date=iso-strict", "--pretty=format:%H%x1f%ad%x1f%s"],
+    repoRoot
+  );
+
+  if (!output.trim()) {
+    return [];
+  }
+
+  return output
+    .split("\n")
+    .map((line) => parseCommitLine(line, repoRoot))
+    .filter((commit): commit is RawCommit => Boolean(commit));
+}
+
+function parseCommitLine(line: string, repoRoot: string): RawCommit | undefined {
+  const [hash, date, ...messageParts] = line.split("\x1f");
+  const message = messageParts.join("\x1f");
+
+  if (!hash || !date) {
+    return undefined;
+  }
+
+  return {
+    hash,
+    date,
+    message,
+    changedFiles: readChangedFiles(repoRoot, hash)
+  };
+}
+
+function readChangedFiles(repoRoot: string, hash: string): string[] {
+  const output = runGitOrEmpty(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", hash], repoRoot);
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function getRemoteWebUrl(repoRoot: string): string | undefined {
+  const remote = runGitOrEmpty(["config", "--get", "remote.origin.url"], repoRoot).trim();
+  if (!remote) {
+    return undefined;
+  }
+
+  return normalizeRemoteUrl(remote);
+}
+
+function normalizeRemoteUrl(remote: string): string | undefined {
+  if (remote.startsWith("git@")) {
+    const match = /^git@([^:]+):(.+?)(\.git)?$/.exec(remote);
+    if (!match?.[1] || !match?.[2]) {
+      return undefined;
+    }
+    return `https://${match[1]}/${match[2].replace(/\.git$/, "")}`;
+  }
+
+  if (remote.startsWith("https://") || remote.startsWith("http://")) {
+    return remote.replace(/\.git$/, "");
+  }
+
+  return undefined;
+}
+
+function normalizeLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit) || limit < 1) {
+    return DEFAULT_LIMIT;
+  }
+
+  return Math.floor(limit);
+}
+
+function runGit(args: string[], cwd: string, silent = false): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    stdio: silent ? ["ignore", "pipe", "ignore"] : ["ignore", "pipe", "pipe"]
+  });
+}
+
+function runGitOrEmpty(args: string[], cwd: string): string {
+  try {
+    return runGit(args, cwd, true);
+  } catch {
+    return "";
+  }
+}

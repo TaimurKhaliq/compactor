@@ -1,0 +1,22 @@
+{
+  "name": "compactor",
+  "version": "0.1.0",
+  "description": "Mine git history for repeated AI coding-agent guidance and generate reusable skill drafts.",
+  "type": "module",
+  "bin": {
+    "compactor": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "start": "node dist/src/cli.js",
+    "compactor": "node dist/src/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.3"
+  }
+}
