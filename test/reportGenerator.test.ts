@@ -6,6 +6,7 @@ import type { MiningResult, ScanResult } from "../src/types.js";
 test("generates concise terminal report", () => {
   const scan: ScanResult = {
     repoRoot: "/tmp/example",
+    packageScripts: ["test"],
     generatedAt: "2026-01-01T00:00:00Z",
     commitsAnalyzed: 5,
     commits: [],
@@ -21,14 +22,19 @@ test("generates concise terminal report", () => {
         name: "Build Project Grid",
         confidence: 0.75,
         evidenceCommits: [
-          { hash: "1111111", shortHash: "1111111", message: "One", changedFiles: [] },
-          { hash: "2222222", shortHash: "2222222", message: "Two", changedFiles: [] }
+          { hash: "1111111", shortHash: "1111111", message: "One", changedFiles: [], diffSignals: [] },
+          { hash: "2222222", shortHash: "2222222", message: "Two", changedFiles: [], diffSignals: [] }
         ],
         commonFiles: [],
         commonDirectories: ["src/app/orders"],
         observedConventions: [],
+        observedChanges: [],
         suggestedValidationCommands: [],
         matchedPatterns: [],
+        pathSignals: [],
+        diffSignals: [],
+        confidenceFactors: [],
+        falsePositiveNotes: [],
         rationale: "Repeated grid work."
       }
     ]

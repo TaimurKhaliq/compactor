@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { classifyCommit, collectRepeatedPathPatterns } from "../analysis/classifier.js";
+import { parseUnifiedDiff } from "./diffParser.js";
+import { readPackageScripts } from "./packageScripts.js";
 import { prepareRepository } from "./repository.js";
 import type { RawCommit, ScanResult } from "../types.js";
 
@@ -22,6 +24,7 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
   const repoRoot = target.repoRoot;
   const limit = normalizeLimit(options.limit);
   const remoteUrl = getRemoteWebUrl(repoRoot);
+  const packageScripts = readPackageScripts(repoRoot);
   const rawCommits = readRawCommits(repoRoot, limit);
   const commits = rawCommits.map((commit) => {
     const metadata = classifyCommit(commit);
@@ -37,6 +40,7 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
     repositoryInput: target.input,
     workspacePath: target.workspacePath,
     remoteUrl,
+    packageScripts,
     generatedAt: new Date().toISOString(),
     commitsAnalyzed: commits.length,
     commits,
@@ -80,7 +84,18 @@ function parseCommitLine(line: string, repoRoot: string): RawCommit | undefined 
     hash,
     date,
     message,
-    changedFiles: readChangedFiles(repoRoot, hash)
+    ...readCommitDiff(repoRoot, hash)
+  };
+}
+
+function readCommitDiff(repoRoot: string, hash: string): Pick<RawCommit, "changedFiles" | "diffSummary"> {
+  const output = runGitOrEmpty(["show", "--format=", "--unified=3", "--find-renames", hash], repoRoot);
+  const diffSummary = parseUnifiedDiff(output);
+  const changedFiles = diffSummary.files.map((file) => file.filePath);
+
+  return {
+    changedFiles: changedFiles.length > 0 ? changedFiles : readChangedFiles(repoRoot, hash),
+    diffSummary
   };
 }
 

@@ -38,8 +38,11 @@ export function renderSkillMarkdown(candidate: CandidateSkill): string {
     "## When to use",
     renderWhenToUse(candidate),
     "",
-    "## Examples",
-    ...renderExamples(candidate).map((example) => `- ${example}`),
+    "## Nearest examples",
+    ...renderNearestExamples(candidate),
+    "",
+    "## Observed changes",
+    ...candidate.observedChanges.map((change) => `- ${change}`),
     "",
     "## Observed repo conventions",
     ...candidate.observedConventions.map((convention) => `- ${convention}`),
@@ -48,14 +51,10 @@ export function renderSkillMarkdown(candidate: CandidateSkill): string {
     ...renderWorkflow(candidate).map((step, index) => `${index + 1}. ${step}`),
     "",
     "## Validation",
-    ...candidate.suggestedValidationCommands.map((command) => `- ${command}`),
-    "- Review the changed files against the nearest existing example before handing off.",
+    ...renderValidation(candidate),
     "",
     "## Evidence",
-    ...candidate.evidenceCommits.map(renderEvidenceCommit),
-    "",
-    "## Common files and directories",
-    ...renderCommonFiles(candidate),
+    ...candidate.evidenceCommits.slice(0, 5).map(renderEvidenceCommit),
     ""
   ].join("\n");
 }
@@ -104,43 +103,25 @@ function renderWhenToUse(candidate: CandidateSkill): string {
       return "Use this when adding or extending an Angular feature slice that touches component and service files together.";
     case "add-api-endpoint":
       return "Use this when adding a route, controller, resolver, endpoint handler, or API-facing feature with tests.";
+    case "add-or-update-cli-feature":
+      return "Use this when adding or changing a CLI command, CLI option, or command-line workflow.";
+    case "add-or-update-ui-server-feature":
+      return "Use this when changing the UI server together with UI implementation or UI tests.";
+    case "add-or-update-product-analysis-feature":
+      return "Use this when adding critic, audit, report, heuristic, or evidence-oriented product analysis behavior.";
     default:
       return `Use this when the task matches repeated history for ${candidate.name}.`;
   }
 }
 
-function renderExamples(candidate: CandidateSkill): string[] {
-  const nearestFile = candidate.commonFiles[0] ? `\`${candidate.commonFiles[0]}\`` : "the nearest matching file";
+function renderNearestExamples(candidate: CandidateSkill): string[] {
+  const examples = candidate.commonFiles.slice(0, 5);
 
-  switch (candidate.id) {
-    case "build-project-grid":
-      return [
-        `Add a new grid using ${nearestFile} as the closest example.`,
-        "Change table columns, search behavior, pagination, or export behavior."
-      ];
-    case "add-or-update-tests":
-      return [
-        `Update coverage near ${nearestFile}.`,
-        "Add a unit spec or e2e test for a changed user workflow."
-      ];
-    case "update-runtime-configuration":
-      return [
-        `Add or rename a config key in ${nearestFile}.`,
-        "Keep related environment and JSON/YAML settings aligned."
-      ];
-    case "add-angular-feature":
-      return [
-        `Create a feature slice next to ${nearestFile}.`,
-        "Update component TypeScript, template/style files, service logic, and nearby specs together."
-      ];
-    case "add-api-endpoint":
-      return [
-        `Add an endpoint using ${nearestFile} as the closest tested pattern.`,
-        "Pair route/controller changes with API tests in the same workflow."
-      ];
-    default:
-      return [`Follow the nearest example around ${nearestFile}.`];
+  if (examples.length === 0) {
+    return ["- No repeated nearest example files were detected."];
   }
+
+  return examples.map((file) => `- ${file}`);
 }
 
 function renderWorkflow(candidate: CandidateSkill): string[] {
@@ -151,7 +132,8 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
         "Reuse the existing column definition and data loading pattern.",
         "Add search, reset, pagination, sorting, and export behavior only when the nearby example supports it.",
         "Keep template, component, service, and model changes in the same feature area.",
-        "Add or update tests that cover the visible grid behavior."
+        "Add or update tests that cover the visible grid behavior when nearby examples include them.",
+        "Run the available validation scripts listed below."
       ];
     case "add-or-update-tests":
       return [
@@ -159,7 +141,7 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
         "Find the closest existing spec or e2e example for the same area.",
         "Mirror the repository's assertion style, fixture setup, and naming pattern.",
         "Cover the changed behavior rather than only snapshotting structure.",
-        "Run the narrow test first, then the broader validation command."
+        "Run the narrow test first when the repo exposes one, then the available validation scripts listed below."
       ];
     case "update-runtime-configuration":
       return [
@@ -167,7 +149,7 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
         "Update related JSON/YAML/env files together.",
         "Check whether build, test, or deployment config needs the same setting.",
         "Avoid hard-coded values when an existing config access pattern exists.",
-        "Run build validation to catch malformed config."
+        "Run the available validation scripts listed below to catch malformed config."
       ];
     case "add-angular-feature":
       return [
@@ -175,15 +157,35 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
         "Create or update the component TypeScript, template, styles, and service as one feature slice.",
         "Reuse existing dependency injection, observable, form, and state patterns.",
         "Add or update the companion .spec.ts file when nearby features have one.",
-        "Run tests and lint before considering the feature complete."
+        "Run the available validation scripts listed below."
       ];
     case "add-api-endpoint":
       return [
-        "Find the closest existing endpoint with tests.",
-        "Mirror route/controller naming, request parsing, response shape, and error handling.",
-        "Keep service/repository calls consistent with nearby endpoints.",
-        "Add or update API tests for success and important failure cases.",
-        "Run the API test suite and lint."
+        "Find the closest route or handler from the nearest examples.",
+        "Mirror request parsing, response shape, and error handling.",
+        "Update nearby tests when the evidence shows endpoint changes are tested together.",
+        "Run the available validation scripts listed below."
+      ];
+    case "add-or-update-cli-feature":
+      return [
+        "Find the nearest command or option wiring.",
+        "Mirror argument parsing, output formatting, and error handling.",
+        "Update tests for the command behavior or option branch.",
+        "Run the available validation scripts listed below."
+      ];
+    case "add-or-update-ui-server-feature":
+      return [
+        "Start from the nearest server/uiServer.ts handler or server-side UI helper.",
+        "Keep UI server behavior aligned with the matching UI component or UI test.",
+        "Update UI tests when the visible behavior changes.",
+        "Run the available validation scripts listed below."
+      ];
+    case "add-or-update-product-analysis-feature":
+      return [
+        "Find the nearest critic, audit, report, heuristic, or evidence module.",
+        "Reuse the existing input, scoring, evidence, and report-shape conventions.",
+        "Update focused tests for the product-analysis behavior.",
+        "Run the available validation scripts listed below."
       ];
     default:
       return [
@@ -194,29 +196,18 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
   }
 }
 
-function renderCommonFiles(candidate: CandidateSkill): string[] {
-  const lines: string[] = [];
-
-  if (candidate.commonFiles.length > 0) {
-    lines.push("- Common files:");
-    lines.push(...candidate.commonFiles.map((file) => `  - ${file}`));
+function renderValidation(candidate: CandidateSkill): string[] {
+  if (candidate.suggestedValidationCommands.length === 0) {
+    return ["- No package.json validation scripts detected."];
   }
 
-  if (candidate.commonDirectories.length > 0) {
-    lines.push("- Common directories:");
-    lines.push(...candidate.commonDirectories.map((directory) => `  - ${directory}`));
-  }
-
-  if (lines.length === 0) {
-    return ["- No common files or directories were detected."];
-  }
-
-  return lines;
+  return candidate.suggestedValidationCommands.map((command) => `- ${command}`);
 }
 
 function renderEvidenceCommit(commit: CandidateSkill["evidenceCommits"][number]): string {
   const label = commit.url ? `[${commit.shortHash}](${commit.url})` : `\`${commit.shortHash}\``;
-  return `- ${label}: ${commit.message}`;
+  const signals = commit.diffSignals.length > 0 ? ` (${commit.diffSignals.slice(0, 2).join("; ")})` : "";
+  return `- ${label}: ${commit.message}${signals}`;
 }
 
 function formatConfidence(confidence: number): string {

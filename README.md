@@ -5,7 +5,7 @@ Compactor is a local-first TypeScript CLI that mines a repository's git history 
 The MVP is deterministic and rule-based. It does not call an LLM API. The goal is to prove the pipeline:
 
 ```text
-git history -> repeated patterns -> candidate skills -> generated agent guidance
+git history -> bounded diff summaries -> repeated patterns -> candidate skills -> generated agent guidance
 ```
 
 ## Why
@@ -56,6 +56,23 @@ When the target is a remote Git URL, Compactor clones it into:
 
 If that workspace already exists, Compactor runs `git pull --ff-only` before analysis. Generated output is written inside the checked-out target repository's own `.compactor/` folder.
 
+### `compactor explain`
+
+Explains why a candidate skill was generated.
+
+```bash
+compactor explain add-or-update-cli-feature
+compactor explain add-or-update-ui-server-feature https://github.com/org/repo.git --limit 100
+```
+
+The explanation includes:
+
+- evidence commits
+- path signals
+- structured diff signals
+- confidence factors
+- possible false-positive notes
+
 ### `compactor scan`
 
 Reads recent local git history, groups changed files by commit, classifies basic metadata, and writes `.compactor/cache/scan-result.json`.
@@ -71,9 +88,11 @@ Captured metadata includes:
 
 - commit hash and message
 - changed files
+- bounded per-file diff summaries
 - file extensions
 - likely area: frontend, backend, tests, config, docs, mixed, or unknown
 - repeated file path patterns
+- added exports, test names, CLI commands/options, package scripts, config keys, and route/handler patterns visible in added lines
 
 ### `compactor mine`
 
@@ -90,7 +109,10 @@ Current deterministic rules create candidates such as:
 - `Add or Update Tests` when multiple commits touch `.spec.ts`, `.test.*`, `playwright`, `e2e`, `cypress`, or `__tests__`
 - `Update Runtime Configuration` when multiple commits touch environment, config, JSON, or YAML files
 - `Add Angular Feature` when multiple commits touch Angular component and service files together
-- `Add API Endpoint` when multiple commits pair API-facing files with tests
+- `Add API Endpoint` only when diffs show added route or handler patterns
+- `Add or Update CLI Feature` when diffs show added CLI commands or options
+- `Add or Update UI Server Feature` when `server/uiServer.ts` changes with UI files or UI tests
+- `Add or Update Product Analysis Feature` when commits repeatedly involve critic, audit, report, heuristic, or evidence files
 
 ### `compactor generate`
 
@@ -112,8 +134,11 @@ Each generated skill includes:
 - examples
 - workflow steps
 - observed repo conventions
+- observed diff-level changes
 - validation checklist
 - evidence commits
+
+Validation commands are generated only from scripts that exist in the target repository's `package.json`, preferring `test`, `build`, `typecheck`, `lint`, `e2e`, and `ui:test`.
 
 ### `compactor report`
 
@@ -149,6 +174,8 @@ Project layout:
 ```text
 src/cli.ts
 src/git/history.ts
+src/git/diffParser.ts
+src/git/packageScripts.ts
 src/git/repository.ts
 src/analysis/classifier.ts
 src/analysis/patternMiner.ts

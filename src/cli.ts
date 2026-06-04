@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { minePatterns } from "./analysis/patternMiner.js";
 import { scanRepository } from "./git/history.js";
+import { generateSkillExplanation } from "./report/explainGenerator.js";
 import { generateReport } from "./report/reportGenerator.js";
 import { generateSkillDrafts } from "./skills/skillGenerator.js";
 import type { MiningResult, ScanResult } from "./types.js";
@@ -18,9 +19,24 @@ const DEFAULT_LIMIT = 50;
 
 function main(): void {
   const [command = "help", ...args] = process.argv.slice(2);
-  const options = parseOptions(args);
 
-  if (options.help || command === "help" || command === "--help" || command === "-h") {
+  if (command === "help" || command === "--help" || command === "-h") {
+    printHelp();
+    return;
+  }
+
+  if (command === "explain") {
+    const { skillId, options } = parseExplainArgs(args);
+    if (options.help) {
+      printHelp();
+      return;
+    }
+    runExplain(skillId, options);
+    return;
+  }
+
+  const options = parseOptions(args);
+  if (options.help) {
     printHelp();
     return;
   }
@@ -136,6 +152,12 @@ function runAnalyze(options: CliOptions): void {
   }
 }
 
+function runExplain(skillId: string, options: CliOptions): void {
+  const scan = scanAndCache(options);
+  const mining = mineAndCache(scan);
+  console.log(generateSkillExplanation(skillId, mining));
+}
+
 function scanAndCache(options: CliOptions): ScanResult {
   const scan = scanRepository({
     repo: options.repo,
@@ -218,6 +240,50 @@ function parseOptions(args: string[]): CliOptions {
   return options;
 }
 
+function parseExplainArgs(args: string[]): { skillId: string; options: CliOptions } {
+  let skillId: string | undefined;
+  const optionArgs: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      optionArgs.push(arg);
+      continue;
+    }
+
+    if ((arg === "--repo" || arg === "--limit" || arg === "-n") && args[index + 1]) {
+      optionArgs.push(arg, args[index + 1] as string);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      optionArgs.push(arg);
+      continue;
+    }
+
+    if (!skillId) {
+      skillId = arg;
+      continue;
+    }
+
+    optionArgs.push(arg);
+  }
+
+  if (!skillId && !optionArgs.includes("--help") && !optionArgs.includes("-h")) {
+    throw new Error("explain requires a skill id");
+  }
+
+  return {
+    skillId: skillId ?? "",
+    options: parseOptions(optionArgs)
+  };
+}
+
 function parseLimit(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
@@ -246,6 +312,7 @@ function printHelp(): void {
 
 Usage:
   compactor analyze [repo-url-or-path] [--limit 50] [--json]
+  compactor explain <skill-id> [repo-url-or-path] [--limit 50]
   compactor scan [--limit 50] [--repo path] [--json]
   compactor mine [--limit 50] [--repo path] [--json]
   compactor generate [--limit 50] [--repo path] [--json]
@@ -253,6 +320,7 @@ Usage:
 
 Commands:
   analyze   Run scan, mine, generate, and report in one shot
+  explain   Explain why a candidate skill was generated
   scan      Read recent git history and cache commit metadata
   mine      Detect repeated development patterns and cache skill candidates
   generate  Generate .compactor/skills/*/SKILL.md and .compactor/AGENTS.md
