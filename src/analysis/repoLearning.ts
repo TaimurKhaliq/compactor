@@ -104,6 +104,17 @@ const TERM_NOISE = new Set([
   "snapshots"
 ]);
 
+const GENERATED_ARTIFACT_PATH_PATTERNS = [
+  /(^|\/)docs\/progress(\/|$)/i,
+  /(^|\/)docs\/testfiles\.html$/i,
+  /(^|\/)docs\/test-progress\.svg$/i,
+  /(^|\/)data\/test-files\.csv$/i,
+  /(^|\/)logs?(\/|$)/i,
+  /(^|\/)test-results\.md$/i,
+  /(^|\/)plan\.md$/i,
+  /(^|\/)(coverage|dist|build|generated|reports?|snapshots?|baselines?|replay|fixtures?)(\/|$)/i
+];
+
 export function learnRepositoryPatterns(scan: Omit<ScanResult, "repoLearning">): RepoLearning {
   const fileCommitCounts = new Map<string, Set<string>>();
   const directoryCommitCounts = new Map<string, Set<string>>();
@@ -119,10 +130,11 @@ export function learnRepositoryPatterns(scan: Omit<ScanResult, "repoLearning">):
       addToSetMap(directoryCommitCounts, directoryOf(file), commit.hash);
     }
 
-    for (let left = 0; left < files.length; left += 1) {
-      for (let right = left + 1; right < files.length; right += 1) {
-        const a = files[left];
-        const b = files[right];
+    const coChangeFiles = files.filter(isCoChangeEligibleFile);
+    for (let left = 0; left < coChangeFiles.length; left += 1) {
+      for (let right = left + 1; right < coChangeFiles.length; right += 1) {
+        const a = coChangeFiles[left];
+        const b = coChangeFiles[right];
         if (!a || !b) continue;
         const [first, second]: [string, string] = a < b ? [a, b] : [b, a];
         const key = `${first}\x1f${second}`;
@@ -180,6 +192,10 @@ export function inferFileRole(filePath: string): FileRole {
     return "build-output";
   }
 
+  if (isGeneratedArtifactPath(lower)) {
+    return "generated";
+  }
+
   if (/(^|\/)(fixtures?|snapshots?|baselines?|replay)(\/|$)/i.test(lower) || /\.(expected|snapshot)\.json$/i.test(lower)) {
     return "fixture";
   }
@@ -207,6 +223,11 @@ export function inferFileRole(filePath: string): FileRole {
   return "unknown";
 }
 
+export function isGeneratedArtifactPath(filePath: string): boolean {
+  const normalized = normalizePath(filePath).toLowerCase();
+  return GENERATED_ARTIFACT_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 export function emptyRoleCounts(): FileRoleCounts {
   return ROLE_NAMES.reduce((counts, role) => {
     counts[role] = 0;
@@ -219,10 +240,10 @@ function buildSurfaces(scan: Omit<ScanResult, "repoLearning">, fileRoles: Record
 
   for (const commit of scan.commits) {
     const files = unique(commit.changedFiles.map(normalizePath));
-    const sourceFiles = files.filter((file) => fileRoles[file] === "source");
-    const sourceDirectories = unique(sourceFiles.map(directoryOf)).filter((directory) => directory !== "repo root");
+    const implementationFiles = files.filter((file) => isImplementationSurfaceRole(fileRoles[file] ?? inferFileRole(file)));
+    const surfaceDirectories = unique(implementationFiles.map(directoryOf)).filter((directory) => directory !== "repo root");
 
-    for (const directory of sourceDirectories) {
+    for (const directory of surfaceDirectories) {
       const surface = accumulators.get(directory) ?? createSurfaceAccumulator(directory);
       accumulators.set(directory, surface);
       surface.commits.add(commit.hash);
@@ -230,12 +251,12 @@ function buildSurfaces(scan: Omit<ScanResult, "repoLearning">, fileRoles: Record
       for (const file of files) {
         incrementMap(surface.allFiles, file);
         const role = fileRoles[file] ?? inferFileRole(file);
-        if (role === "source" && directoryOf(file) === directory) incrementMap(surface.sourceFiles, file);
+        if (isImplementationSurfaceRole(role) && directoryOf(file) === directory) incrementMap(surface.sourceFiles, file);
         if (role === "test") incrementMap(surface.testFiles, file);
-        if (role === "config" || role === "docs") incrementMap(surface.configOrDocsFiles, file);
+        if (role === "config" || (role === "docs" && directoryOf(file) !== directory)) incrementMap(surface.configOrDocsFiles, file);
       }
 
-      for (const term of [...commit.messageTerms, ...sourceFiles.filter((file) => directoryOf(file) === directory).flatMap(pathTerms), ...pathTerms(directory)]) {
+      for (const term of [...commit.messageTerms, ...implementationFiles.filter((file) => directoryOf(file) === directory).flatMap(pathTerms), ...pathTerms(directory)]) {
         const normalized = normalizeTerm(term);
         if (!normalized || TERM_NOISE.has(normalized)) continue;
         addToSetMap(surface.messageTerms, normalized, commit.hash);
@@ -248,6 +269,10 @@ function buildSurfaces(scan: Omit<ScanResult, "repoLearning">, fileRoles: Record
     .filter((surface) => surface.commitCount >= 2 && surface.sourceFileCount > 0 && surface.confidence >= 0.35)
     .sort((a, b) => b.confidence - a.confidence || b.commitCount - a.commitCount || a.commonDirectory.localeCompare(b.commonDirectory))
     .slice(0, 25);
+}
+
+function isImplementationSurfaceRole(role: FileRole): boolean {
+  return role === "source" || role === "docs";
 }
 
 function createSurfaceAccumulator(directory: string): SurfaceAccumulator {
@@ -292,6 +317,15 @@ function finalizeSurface(repoRoot: string, surface: SurfaceAccumulator, fileRole
     roleCounts,
     coChangeEvidence,
   };
+}
+
+function isCoChangeEligibleFile(filePath: string): boolean {
+  if (isGeneratedArtifactPath(filePath)) {
+    return false;
+  }
+
+  const role = inferFileRole(filePath);
+  return role === "source" || role === "test" || role === "config" || role === "docs";
 }
 
 function surfaceDisplayName(directory: string, repeatedTerms: string[]): string {

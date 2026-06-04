@@ -6,6 +6,7 @@ import { detectPythonFrameworkHints, detectPythonPathSignals } from "./detectors
 import { detectSqlFrameworkHints, detectSqlPathSignals } from "./detectors/sqlDetector.js";
 import { detectTestAndDocsPathSignals } from "./detectors/testDocsDetector.js";
 import { detectTypeScriptFrameworkHints, detectTypeScriptPathSignals } from "./detectors/typescriptDetector.js";
+import { isGeneratedArtifactPath } from "./repoLearning.js";
 import type { DiffSignal, GenericSignal, RawCommit } from "../types.js";
 
 export interface CommitSignalSummary {
@@ -61,6 +62,10 @@ export function summarizeCommitSignals(commit: RawCommit): CommitSignalSummary {
 }
 
 export function extractPathSignals(filePath: string): GenericSignal[] {
+  if (isGeneratedArtifactPath(filePath)) {
+    return detectTestAndDocsPathSignals(filePath);
+  }
+
   return unique([
     ...detectTypeScriptPathSignals(filePath),
     ...detectPythonPathSignals(filePath),

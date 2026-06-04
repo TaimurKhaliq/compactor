@@ -1,7 +1,8 @@
 import { posix as path } from "node:path";
 import { emptyRoleCounts, inferFileRole, learnRepositoryPatterns } from "./repoLearning.js";
+import { extractPathSignals } from "./genericSignals.js";
 import { discoverValidationCommandsForFiles } from "../git/packageScripts.js";
-import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, FileRoleCounts, GenericSignal, LearnedSurface, MiningResult, RepoLearning, ScanResult, SurfaceTaskKind } from "../types.js";
+import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, FileDiffSummary, FileRoleCounts, GenericSignal, LearnedSurface, MiningResult, RepoLearning, ScanResult, SurfaceTaskKind, WorkflowAction, WorkflowActionSummary, WorkflowProfile, WorkflowStepEvidence } from "../types.js";
 
 interface WorkingCluster {
   commits: CommitMetadata[];
@@ -48,6 +49,14 @@ interface DuplicateHandlingSummary {
 interface TaskEvidenceSupport {
   hasTaskSourceEvidence: boolean;
   hasTestOrValidationSignal: boolean;
+}
+
+interface SurfaceEvidenceSplit {
+  surfaceEvidenceCommits: CommitMetadata[];
+  supportingEvidenceCommits: CommitMetadata[];
+  rejectedEvidenceCommits: CommitMetadata[];
+  relevantCommits: CommitMetadata[];
+  relevantFiles: string[];
 }
 
 type LearnedSurfaceMatch = NonNullable<CandidateSkill["learnedSurface"]>;
@@ -252,6 +261,13 @@ const NOISY_NAMING_TERMS = new Set([
 ]);
 
 const NOISY_EVIDENCE_FILE_PATTERNS = [
+  /(^|\/)docs\/progress(\/|$)/i,
+  /(^|\/)docs\/testfiles\.html$/i,
+  /(^|\/)docs\/test-progress\.svg$/i,
+  /(^|\/)data\/test-files\.csv$/i,
+  /(^|\/)logs?(\/|$)/i,
+  /(^|\/)test-results\.md$/i,
+  /(^|\/)plan\.md$/i,
   /(^|\/)(fixtures?|reports?|replay|baselines?|snapshots?|coverage|dist|build|generated)(\/|$)/i,
   /(^|\/)package-lock\.json$/i,
   /(^|\/)repo_learning_state\.json$/i,
@@ -391,10 +407,14 @@ function cloneCandidate(candidate: CandidateSkill): CandidateSkill {
   return {
     ...candidate,
     evidenceCommits: candidate.evidenceCommits.map((commit) => ({ ...commit, changedFiles: [...commit.changedFiles], diffSignals: [...commit.diffSignals], pathSignals: [...commit.pathSignals] })),
+    surfaceEvidenceCommits: candidate.surfaceEvidenceCommits?.map((commit) => ({ ...commit, changedFiles: [...commit.changedFiles], diffSignals: [...commit.diffSignals], pathSignals: [...commit.pathSignals] })),
+    supportingEvidenceCommits: candidate.supportingEvidenceCommits?.map((commit) => ({ ...commit, changedFiles: [...commit.changedFiles], diffSignals: [...commit.diffSignals], pathSignals: [...commit.pathSignals] })),
+    rejectedEvidenceCommits: candidate.rejectedEvidenceCommits?.map((commit) => ({ ...commit, changedFiles: [...commit.changedFiles], diffSignals: [...commit.diffSignals], pathSignals: [...commit.pathSignals] })),
     commonFiles: [...candidate.commonFiles],
     commonDirectories: [...candidate.commonDirectories],
     observedConventions: [...candidate.observedConventions],
     observedChanges: [...candidate.observedChanges],
+    workflowProfile: candidate.workflowProfile ? cloneWorkflowProfile(candidate.workflowProfile) : undefined,
     suggestedValidationCommands: [...candidate.suggestedValidationCommands],
     genericSignals: [...candidate.genericSignals],
     repeatedTerms: [...candidate.repeatedTerms],
@@ -412,8 +432,34 @@ function cloneCandidate(candidate: CandidateSkill): CandidateSkill {
   };
 }
 
+function cloneWorkflowProfile(profile: WorkflowProfile): WorkflowProfile {
+  return {
+    actions: profile.actions.map(cloneWorkflowActionSummary),
+    sourceActions: profile.sourceActions.map(cloneWorkflowActionSummary),
+    testActions: profile.testActions.map(cloneWorkflowActionSummary),
+    supportingArtifactActions: profile.supportingArtifactActions.map(cloneWorkflowActionSummary),
+    validationCommands: [...profile.validationCommands],
+    steps: profile.steps.map((step) => ({ ...step, files: [...step.files] })),
+    usesGenericFallback: profile.usesGenericFallback
+  };
+}
+
+function cloneWorkflowActionSummary(summary: WorkflowActionSummary): WorkflowActionSummary {
+  return {
+    ...summary,
+    files: [...summary.files],
+    commits: [...summary.commits]
+  };
+}
+
 function mergeCandidateEvidence(target: CandidateSkill, source: CandidateSkill): void {
   target.evidenceCommits = mergeEvidenceCommits(target.evidenceCommits, source.evidenceCommits);
+  target.surfaceEvidenceCommits = mergeEvidenceCommits(target.surfaceEvidenceCommits ?? [], source.surfaceEvidenceCommits ?? []);
+  target.supportingEvidenceCommits = mergeEvidenceCommits(target.supportingEvidenceCommits ?? [], source.supportingEvidenceCommits ?? []);
+  target.rejectedEvidenceCommits = mergeEvidenceCommits(target.rejectedEvidenceCommits ?? [], source.rejectedEvidenceCommits ?? []);
+  target.rawEvidenceCommitCount = (target.rawEvidenceCommitCount ?? target.evidenceCommits.length) + (source.rawEvidenceCommitCount ?? source.evidenceCommits.length);
+  target.surfaceRelevantCommitCount = target.evidenceCommits.length;
+  target.rejectedEvidenceCommitCount = (target.rejectedEvidenceCommitCount ?? 0) + (source.rejectedEvidenceCommitCount ?? 0);
   target.commonFiles = unique([...target.commonFiles, ...source.commonFiles, ...source.evidenceCommits.flatMap((commit) => commit.changedFiles)]).slice(0, 12);
   target.commonDirectories = unique([...target.commonDirectories, ...source.commonDirectories]).slice(0, 8);
   target.observedChanges = unique([...target.observedChanges, ...source.observedChanges]).slice(0, 12);
@@ -553,22 +599,71 @@ function addCommitToCluster(cluster: WorkingCluster, commit: CommitMetadata, sur
   }
 }
 
+function clusterFromCommits(commits: CommitMetadata[], repoLearning: RepoLearning): WorkingCluster {
+  const cluster: WorkingCluster = {
+    commits: [],
+    signalCounts: new Map(),
+    directoryCounts: new Map(),
+    surfaceCounts: new Map()
+  };
+
+  for (const commit of commits) {
+    addCommitToCluster(cluster, commit, surfaceIdsForCommit(repoLearning, commit));
+  }
+
+  return cluster;
+}
+
 function surfaceIdsForCommit(repoLearning: RepoLearning, commit: CommitMetadata): string[] {
   const files = commit.changedFiles.map((file) => path.normalize(file));
   return repoLearning.surfaces
-    .filter((surface) => files.some((file) => fileBelongsToSurface(file, surface)))
+    .filter((surface) => files.some((file) => fileDirectlyTouchesSurface(file, surface)))
     .map((surface) => surface.id);
 }
 
 function fileBelongsToSurface(filePath: string, surface: Pick<LearnedSurfaceMatch, "commonDirectory" | "representativeFiles" | "coChangingTestFiles" | "coChangingConfigOrDocsFiles" | "coChangeEvidence">): boolean {
+  return fileDirectlyTouchesSurface(filePath, surface) || fileSupportsSurface(filePath, surface);
+}
+
+function fileDirectlyTouchesSurface(filePath: string, surface: Pick<LearnedSurfaceMatch, "commonDirectory" | "representativeFiles" | "coChangeEvidence">): boolean {
   const normalized = path.normalize(filePath);
   return normalized === surface.commonDirectory ||
     normalized.startsWith(`${surface.commonDirectory}/`) ||
     surface.representativeFiles.includes(normalized) ||
-    surface.coChangingTestFiles.includes(normalized) ||
-    surface.coChangingConfigOrDocsFiles.includes(normalized) ||
     surfaceCoChangeFiles(surface).includes(normalized);
 }
+
+function fileSupportsSurface(filePath: string, surface: Pick<LearnedSurfaceMatch, "coChangingTestFiles" | "coChangingConfigOrDocsFiles">): boolean {
+  const normalized = path.normalize(filePath);
+  if (isNoisyEvidenceFile(normalized)) {
+    return false;
+  }
+
+  return surface.coChangingTestFiles.includes(normalized) || surface.coChangingConfigOrDocsFiles.includes(normalized);
+}
+
+function fileCanSupportSurfaceWorkflow(filePath: string, surface: LearnedSurfaceMatch): boolean {
+  const normalized = path.normalize(filePath);
+  if (isNoisyEvidenceFile(normalized) || fileDirectlyTouchesSurface(normalized, surface) || isTestFile(normalized)) {
+    return false;
+  }
+
+  const role = inferFileRole(normalized);
+  if (role !== "source") {
+    return false;
+  }
+
+  if (surface.taskKind === "ui") {
+    return isApiClientFile(normalized, surface);
+  }
+
+  if (surface.taskKind === "api") {
+    return isApiClientFile(normalized, surface) || /(^|\/)(models?|entities?|schemas?)(\/|$)/i.test(normalized);
+  }
+
+  return false;
+}
+
 
 function matchLearnedSurface(repoLearning: RepoLearning, commits: CommitMetadata[], evidenceFiles: string[], signals: GenericSignal[] = []): LearnedSurfaceMatch | undefined {
   const candidates = repoLearning.surfaces
@@ -580,7 +675,7 @@ function matchLearnedSurface(repoLearning: RepoLearning, commits: CommitMetadata
 }
 
 function surfaceMatchScore(surface: LearnedSurface, commits: CommitMetadata[], evidenceFiles: string[], signals: GenericSignal[]): LearnedSurfaceMatch | undefined {
-  const matchingCommits = commits.filter((commit) => commit.changedFiles.some((file) => fileBelongsToSurface(file, surface)));
+  const matchingCommits = commits.filter((commit) => commit.changedFiles.some((file) => fileDirectlyTouchesSurface(file, surface)));
   const matchShare = commits.length === 0 ? 0 : matchingCommits.length / commits.length;
   const usefulFiles = unique(evidenceFiles.map((file) => path.normalize(file)));
   const surfaceFiles = new Set([
@@ -588,15 +683,15 @@ function surfaceMatchScore(surface: LearnedSurface, commits: CommitMetadata[], e
     ...surface.coChangingTestFiles,
     ...surface.coChangingConfigOrDocsFiles
   ]);
-  const overlap = usefulFiles.filter((file) => surfaceFiles.has(file) || fileBelongsToSurface(file, surface)).length;
+  const overlap = usefulFiles.filter((file) => surfaceFiles.has(file) || fileDirectlyTouchesSurface(file, surface)).length;
   const overlapShare = usefulFiles.length === 0 ? 0 : overlap / usefulFiles.length;
-  const sourceEvidence = usefulFiles.filter((file) => inferFileRole(file) === "source" && fileBelongsToSurface(file, surface));
+  const inferredKind = inferSurfaceTaskKind(surface, signals);
+  const sourceEvidence = usefulFiles.filter((file) => isSurfaceImplementationEvidence(file, inferredKind) && fileDirectlyTouchesSurface(file, surface));
 
   if (matchShare < 0.4 || sourceEvidence.length === 0) {
     return undefined;
   }
 
-  const inferredKind = inferSurfaceTaskKind(surface, signals);
   const confidence = Number(Math.min(0.98, surface.confidence * 0.42 + matchShare * 0.34 + overlapShare * 0.16 + (surface.coChangingTestFiles.length > 0 ? 0.05 : 0) + (surface.validationCommands.length > 0 ? 0.03 : 0) + surfaceSignalAlignmentBoost(inferredKind, signals)).toFixed(2));
   const roleCounts = roleCountsForFiles(usefulFiles);
 
@@ -636,6 +731,14 @@ function surfaceSignalAlignmentBoost(kind: SurfaceTaskKind, signals: GenericSign
   return 0;
 }
 
+function isSurfaceImplementationEvidence(filePath: string, kind: SurfaceTaskKind): boolean {
+  const role = inferFileRole(filePath);
+  if (role === "source") {
+    return true;
+  }
+  return kind === "docs" && role === "docs";
+}
+
 function surfaceSelectionRank(surface: LearnedSurfaceMatch, signals: GenericSignal[]): number {
   const kind = surface.taskKind ?? inferSurfaceTaskKind(surface, signals);
   if (kind === "commands") return 0;
@@ -670,6 +773,42 @@ function enrichLearnedSurface(surface: LearnedSurfaceMatch, commits: CommitMetad
 
 function isStrongLearnedSurface(surface: LearnedSurfaceMatch | undefined): surface is LearnedSurfaceMatch {
   return Boolean(surface && surface.matchShare >= 0.65 && surface.confidence >= 0.65);
+}
+
+function splitSurfaceEvidence(commits: CommitMetadata[], surface: LearnedSurfaceMatch): SurfaceEvidenceSplit {
+  const surfaceEvidenceCommits: CommitMetadata[] = [];
+  const supportingEvidenceCommits: CommitMetadata[] = [];
+  const rejectedEvidenceCommits: CommitMetadata[] = [];
+  const relevantFiles: string[] = [];
+
+  for (const commit of commits) {
+    const files = commit.changedFiles.map((file) => path.normalize(file));
+    const directFiles = files.filter((file) => fileDirectlyTouchesSurface(file, surface) && !isNoisyEvidenceFile(file));
+    const supportingFiles = files.filter((file) => fileSupportsSurface(file, surface));
+    const secondarySourceFiles = files.filter((file) => fileCanSupportSurfaceWorkflow(file, surface) && !directFiles.includes(file));
+
+    if (directFiles.length > 0) {
+      surfaceEvidenceCommits.push(commit);
+      relevantFiles.push(...directFiles, ...secondarySourceFiles, ...supportingFiles);
+      continue;
+    }
+
+    if (supportingFiles.length > 0) {
+      supportingEvidenceCommits.push(commit);
+      relevantFiles.push(...supportingFiles);
+      continue;
+    }
+
+    rejectedEvidenceCommits.push(commit);
+  }
+
+  return {
+    surfaceEvidenceCommits,
+    supportingEvidenceCommits,
+    rejectedEvidenceCommits,
+    relevantCommits: [...surfaceEvidenceCommits, ...supportingEvidenceCommits],
+    relevantFiles: unique(relevantFiles)
+  };
 }
 
 function inferSurfaceTaskKind(surface: Pick<LearnedSurfaceMatch, "commonDirectory" | "representativeFiles" | "coChangingTestFiles" | "validationCommands" | "dominantExtensions" | "roleCounts" | "sourceTerms">, signals: GenericSignal[] = []): SurfaceTaskKind {
@@ -844,29 +983,88 @@ function roleCountsForFiles(files: string[]): FileRoleCounts {
   return counts;
 }
 
+function surfaceCommonFiles(files: string[], surface: LearnedSurfaceMatch): string[] {
+  const selected = unique(files)
+    .filter((file) => !isNoisyEvidenceFile(file))
+    .sort((a, b) => surfaceFileRank(a, surface) - surfaceFileRank(b, surface) || a.localeCompare(b));
+  return selected.slice(0, 8);
+}
+
+function surfaceCommonDirectories(files: string[], surface: LearnedSurfaceMatch): string[] {
+  const directories = unique([
+    surface.commonDirectory,
+    ...surfaceCommonFiles(files, surface).map(directoryForFile)
+  ]).filter((directory) => directory !== "repo root" || surface.commonDirectory === "repo root");
+
+  return directories
+    .filter((directory) => directory === surface.commonDirectory || !isNoisyEvidenceFile(`${directory}/placeholder`))
+    .slice(0, 6);
+}
+
+function surfaceFileRank(file: string, surface: LearnedSurfaceMatch): number {
+  if (isSurfaceImplementationEvidence(file, surface.taskKind ?? "source-workflow") && fileDirectlyTouchesSurface(file, surface)) return 0;
+  if (fileSupportsSurface(file, surface) && isTestFile(file)) return 1;
+  if (fileSupportsSurface(file, surface)) return 2;
+  return 9;
+}
+
+function directoryForFile(file: string): string {
+  const directory = path.dirname(file);
+  return directory === "." ? "repo root" : directory;
+}
+
+function surfaceCoChangeEvidence(surface: LearnedSurfaceMatch): LearnedSurfaceMatch["coChangeEvidence"] {
+  return surface.coChangeEvidence
+    .filter((edge) => edge.files.every((file) => !isNoisyEvidenceFile(file)))
+    .filter((edge) => edge.files.some((file) => fileDirectlyTouchesSurface(file, surface)))
+    .filter((edge) => edge.files.every((file) => inferFileRole(file) === "source" || inferFileRole(file) === "test"))
+    .slice(0, 8);
+}
+
 function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number): CandidateSkill {
-  const commits = cluster.commits;
-  const dominant = dominantSignals(cluster, 10);
-  const evidenceFiles = filteredEvidenceFiles(commits);
+  const rawCommits = cluster.commits;
+  const rawDominant = dominantSignals(cluster, 10);
+  const rawEvidenceFiles = filteredEvidenceFiles(rawCommits);
   const repoLearning = scan.repoLearning ?? learnRepositoryPatterns(scan);
-  const matchedSurface = matchLearnedSurface(repoLearning, commits, evidenceFiles, dominant);
-  const learnedSurface = matchedSurface ? enrichLearnedSurface(matchedSurface, commits, dominant, scan) : undefined;
+  const matchedSurface = matchLearnedSurface(repoLearning, rawCommits, rawEvidenceFiles, rawDominant);
+  const rawLearnedSurface = matchedSurface ? enrichLearnedSurface(matchedSurface, rawCommits, rawDominant, scan) : undefined;
+  const evidenceSplit = rawLearnedSurface ? splitSurfaceEvidence(rawCommits, rawLearnedSurface) : undefined;
+  const commits = evidenceSplit && evidenceSplit.relevantCommits.length > 0 ? evidenceSplit.relevantCommits : rawCommits;
+  const candidateCluster = commits === rawCommits ? cluster : clusterFromCommits(commits, repoLearning);
+  const dominant = dominantSignals(candidateCluster, 10);
+  const learnedSurface = rawLearnedSurface && evidenceSplit && evidenceSplit.relevantCommits.length > 0
+    ? {
+        ...rawLearnedSurface,
+        matchShare: Number((evidenceSplit.surfaceEvidenceCommits.length / evidenceSplit.relevantCommits.length).toFixed(2)),
+        roleCounts: roleCountsForFiles(evidenceSplit.relevantFiles),
+        coChangeEvidence: surfaceCoChangeEvidence(rawLearnedSurface),
+        reasons: [
+          ...rawLearnedSurface.reasons,
+          `${evidenceSplit.surfaceEvidenceCommits.length} commits directly touched ${rawLearnedSurface.commonDirectory}.`,
+          `${evidenceSplit.supportingEvidenceCommits.length} supporting commits touched learned co-changing tests/config/docs.`,
+          `${evidenceSplit.rejectedEvidenceCommits.length} broad-cluster commits were rejected as unrelated or generated-artifact noise.`
+        ]
+      }
+    : rawLearnedSurface;
   const strongLearnedSurface = isStrongLearnedSurface(learnedSurface) ? learnedSurface : undefined;
   const strongSurface = Boolean(strongLearnedSurface);
   const termEvidence = refineDomainTermEvidence(computeDomainTermEvidence(commits, scan), commits, dominant);
   const proposal = proposeSkillName(dominant, termEvidence, frameworkHints(commits));
-  const patternConfidence = calculatePatternConfidence(cluster, scan.commitsAnalyzed);
-  const commonFiles = topValues(evidenceFiles, 8);
-  const commonDirectories = topValues(evidenceFiles.map((file) => path.dirname(file) === "." ? "repo root" : path.dirname(file)), 6);
-  const pathSignals = topValues(commits.flatMap((commit) => commit.pathSignals), 12);
-  const diffSignals = topDiffSignalLabels(commits, 12);
+  const patternConfidence = calculatePatternConfidence(candidateCluster, scan.commitsAnalyzed);
+  const evidenceFiles = evidenceSplit && learnedSurface ? evidenceSplit.relevantFiles : filteredEvidenceFiles(commits);
+  const commonFiles = learnedSurface ? surfaceCommonFiles(evidenceFiles, learnedSurface) : topValues(evidenceFiles, 8);
+  const commonDirectories = learnedSurface ? surfaceCommonDirectories(evidenceFiles, learnedSurface) : topValues(evidenceFiles.map(directoryForFile), 6);
+  const pathSignals = topValues(learnedSurface ? evidenceFiles.flatMap(extractPathSignals) : commits.flatMap((commit) => commit.pathSignals), 12);
+  const diffSignals = topDiffSignalLabels(commits, 12, learnedSurface);
   const surfaceTerms = learnedSurface?.sourceTerms ?? [];
   const finalDomainTerms = strongLearnedSurface ? surfaceDomainTerms(strongLearnedSurface) : proposal.domainTerms;
   const terms = strongLearnedSurface ? surfaceTerms : unique([...termEvidence.repeated, ...(learnedSurface?.repeatedTerms ?? [])]);
   const validationCommands = unique([
     ...(learnedSurface?.validationCommands ?? []),
-    ...discoverValidationCommandsForFiles(scan.repoRoot, unique([...commonFiles, ...(learnedSurface?.representativeFiles ?? []), ...(learnedSurface?.coChangingTestFiles ?? [])]))
+    ...discoverValidationCommandsForFiles(scan.repoRoot, unique([...commonFiles, ...(learnedSurface?.representativeFiles ?? []), ...(learnedSurface?.coChangingTestFiles ?? [])])),
+    ...scan.validationCommands
   ]);
+  const workflowProfile = buildWorkflowProfile(commits, learnedSurface, validationCommands);
   const taskEvidenceFiles = unique(evidenceFiles);
   const taskArea = effectiveTaskArea(commits, dominant, taskEvidenceFiles, learnedSurface);
   const artifactShare = generatedArtifactEvidenceShare(commits);
@@ -885,13 +1083,21 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
     validationCommands,
     taskName,
     taskArea,
-    learnedSurface
+    learnedSurface,
+    evidenceSplit?.surfaceEvidenceCommits.length,
+    workflowProfile
   );
   const namingConfidence = finalNamingConfidence(namingAdjustment.confidence, promotion);
   const candidateName = promotion.promotionLevel === "pattern_candidate"
     ? neutralPatternCandidateName(dominant, promotion.primaryArea, promotion.primaryAreaShare, termEvidence.selected, proposal.genericCategory)
     : taskName;
   const id = uniqueSkillId(candidateName, dominant, index);
+  const evidenceCommitSource = evidenceSplit
+    ? [
+        ...representativeCommits(evidenceSplit.surfaceEvidenceCommits, dominant),
+        ...representativeCommits(evidenceSplit.supportingEvidenceCommits, dominant)
+      ]
+    : representativeCommits(commits, dominant);
 
   return {
     id,
@@ -908,11 +1114,18 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
     patternConfidence,
     namingConfidence,
     confidence: patternConfidence,
-    evidenceCommits: representativeCommits(commits, dominant).map(toEvidenceCommit),
+    evidenceCommits: evidenceCommitSource.map((commit) => toEvidenceCommit(commit, learnedSurface)),
+    surfaceEvidenceCommits: evidenceSplit?.surfaceEvidenceCommits.map((commit) => toEvidenceCommit(commit, learnedSurface)),
+    supportingEvidenceCommits: evidenceSplit?.supportingEvidenceCommits.map((commit) => toEvidenceCommit(commit, learnedSurface)),
+    rejectedEvidenceCommits: evidenceSplit?.rejectedEvidenceCommits.map((commit) => toEvidenceCommit(commit)),
+    rawEvidenceCommitCount: rawCommits.length,
+    surfaceRelevantCommitCount: evidenceSplit?.relevantCommits.length ?? commits.length,
+    rejectedEvidenceCommitCount: evidenceSplit?.rejectedEvidenceCommits.length ?? 0,
     commonFiles,
     commonDirectories,
     observedConventions: observedConventions(dominant, commonDirectories, frameworkHints(commits)),
-    observedChanges: observedChanges(commits),
+    observedChanges: observedChanges(commits, learnedSurface),
+    workflowProfile,
     suggestedValidationCommands: validationCommands,
     genericSignals: dominant,
     repeatedTerms: terms,
@@ -934,10 +1147,10 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
     matchedPatterns: dominant,
     pathSignals,
     diffSignals,
-    confidenceFactors: confidenceFactors(cluster, scan.commitsAnalyzed, strongLearnedSurface ? [`learned surface used for name: ${strongLearnedSurface.displayName}`, ...namingAdjustment.reasons] : [...proposal.reasons, ...namingAdjustment.reasons], learnedSurface),
+    confidenceFactors: confidenceFactors(candidateCluster, scan.commitsAnalyzed, strongLearnedSurface ? [`learned surface used for name: ${strongLearnedSurface.displayName}`, ...namingAdjustment.reasons] : [...proposal.reasons, ...namingAdjustment.reasons], learnedSurface, rawCommits.length, evidenceSplit?.relevantCommits.length, evidenceSplit?.rejectedEvidenceCommits.length),
     falsePositiveNotes: falsePositiveNotes(dominant, commits, namingConfidence),
     rationale: learnedSurface
-      ? `Compactor grouped ${commits.length} commits around learned surface ${learnedSurface.displayName} (${learnedSurface.commonDirectory}) with repeated change shape: ${dominant.join(", ") || "source/test co-change"}.`
+      ? `Compactor grouped ${rawCommits.length} broad-cluster commits around learned surface ${learnedSurface.displayName} (${learnedSurface.commonDirectory}); ${evidenceSplit?.relevantCommits.length ?? commits.length} surface-relevant commits were used for the skill.`
       : `Compactor grouped ${commits.length} commits with a repeated change shape: ${dominant.join(", ")}.`,
     learnedSurface
   };
@@ -1067,17 +1280,29 @@ function hasAsyncEvidence(terms: string[], frameworks: string[]): boolean {
 
 function calculatePatternConfidence(cluster: WorkingCluster, totalCommits: number): number {
   const matchCount = cluster.commits.length;
-  const topSignalConsistency = Math.max(...[...cluster.signalCounts.values()]) / matchCount;
-  const topDirectoryConsistency = Math.max(...[...cluster.directoryCounts.values()]) / matchCount;
+  if (matchCount === 0) {
+    return 0;
+  }
+  const topSignalConsistency = cluster.signalCounts.size > 0 ? Math.max(...[...cluster.signalCounts.values()]) / matchCount : 0;
+  const topDirectoryConsistency = cluster.directoryCounts.size > 0 ? Math.max(...[...cluster.directoryCounts.values()]) / matchCount : 0;
   const frequency = totalCommits === 0 ? 0 : Math.min(matchCount / totalCommits, 1);
   return Number(Math.min(0.97, 0.28 + Math.min(matchCount, 8) * 0.055 + topSignalConsistency * 0.18 + topDirectoryConsistency * 0.12 + frequency * 0.12).toFixed(2));
 }
 
-function confidenceFactors(cluster: WorkingCluster, totalCommits: number, namingReasons: string[], learnedSurface?: LearnedSurfaceMatch): string[] {
+function confidenceFactors(
+  cluster: WorkingCluster,
+  totalCommits: number,
+  namingReasons: string[],
+  learnedSurface?: LearnedSurfaceMatch,
+  rawCommitCount = cluster.commits.length,
+  relevantCommitCount = cluster.commits.length,
+  rejectedCommitCount = 0
+): string[] {
   const commits = cluster.commits;
   const dominant = dominantSignals(cluster, 6);
   return [
-    `${commits.length} of ${totalCommits} scanned commits matched this repeated change shape.`,
+    `${relevantCommitCount} surface-relevant commits were used from ${rawCommitCount} broad-cluster commits (${rejectedCommitCount} rejected as unrelated or generated noise).`,
+    `${commits.length} of ${totalCommits} scanned commits matched the filtered repeated change shape.`,
     learnedSurface
       ? `Learned implementation surface: ${learnedSurface.displayName} under ${learnedSurface.commonDirectory} (${Math.round(learnedSurface.confidence * 100)}% match confidence).`
       : "No learned implementation surface was strong enough for this cluster.",
@@ -1094,12 +1319,288 @@ function observedConventions(signals: GenericSignal[], directories: string[], fr
   return conventions;
 }
 
-function observedChanges(commits: CommitMetadata[]): string[] {
-  const labels = topDiffSignalLabels(commits, 8);
+function observedChanges(commits: CommitMetadata[], learnedSurface?: LearnedSurfaceMatch): string[] {
+  const labels = topDiffSignalLabels(commits, 8, learnedSurface);
   if (labels.length === 0) {
     return ["No structured diff-level changes were detected beyond path signals."];
   }
   return labels.map((label) => `Observed ${label}.`);
+}
+
+function buildWorkflowProfile(commits: CommitMetadata[], learnedSurface: LearnedSurfaceMatch | undefined, validationCommands: string[]): WorkflowProfile | undefined {
+  if (!learnedSurface) {
+    return undefined;
+  }
+
+  const actionMap = new Map<WorkflowAction, { files: Set<string>; commits: Set<string>; groupCounts: Map<WorkflowActionSummary["group"], number>; order: number }>();
+  let order = 0;
+
+  for (const commit of commits) {
+    const relevantFiles = surfaceRelevantFiles(commit.changedFiles, learnedSurface);
+    const fileOrder = orderedWorkflowFiles(commit, relevantFiles);
+
+    for (const file of fileOrder) {
+      const summary = commit.diffSummary.files.find((entry) => path.normalize(entry.filePath) === path.normalize(file));
+      const group = workflowActionGroup(file, learnedSurface);
+      const actions = workflowActionsForFile(file, summary, commit, learnedSurface);
+
+      for (const action of actions) {
+        const entry = actionMap.get(action) ?? { files: new Set<string>(), commits: new Set<string>(), groupCounts: new Map(), order: order++ };
+        entry.files.add(file);
+        entry.commits.add(commit.hash);
+        entry.groupCounts.set(group, (entry.groupCounts.get(group) ?? 0) + 1);
+        actionMap.set(action, entry);
+      }
+    }
+  }
+
+  const minActionCount = Math.min(2, Math.max(1, Math.ceil(commits.length * 0.35)));
+  const actions = [...actionMap.entries()]
+    .map(([action, entry]) => ({
+      action,
+      count: entry.commits.size,
+      files: [...entry.files].sort().slice(0, 5),
+      commits: [...entry.commits].sort(),
+      group: dominantWorkflowGroup(entry.groupCounts),
+      order: entry.order
+    }))
+    .filter((summary) => summary.count >= minActionCount)
+    .sort((a, b) => workflowActionPriority(a.action, learnedSurface.taskKind) - workflowActionPriority(b.action, learnedSurface.taskKind) || b.count - a.count || a.order - b.order)
+    .map(({ order: _order, ...summary }) => summary);
+
+  const sourceActions = actions.filter((action) => action.group === "source");
+  const testActions = actions.filter((action) => action.group === "test");
+  const supportingArtifactActions = actions.filter((action) => action.group === "supporting");
+  const steps = workflowStepsForActions(actions, learnedSurface, validationCommands);
+
+  return {
+    actions,
+    sourceActions,
+    testActions,
+    supportingArtifactActions,
+    validationCommands,
+    steps,
+    usesGenericFallback: steps.length === 0
+  };
+}
+
+function orderedWorkflowFiles(commit: CommitMetadata, relevantFiles: string[]): string[] {
+  const diffOrder = commit.diffSummary.files.map((file) => path.normalize(file.filePath));
+  return unique([
+    ...diffOrder.filter((file) => relevantFiles.includes(file)),
+    ...relevantFiles
+  ]);
+}
+
+function workflowActionGroup(filePath: string, learnedSurface: LearnedSurfaceMatch): WorkflowActionSummary["group"] {
+  if (isTestFile(filePath)) {
+    return "test";
+  }
+
+  if (learnedSurface.taskKind === "docs" && fileDirectlyTouchesSurface(filePath, learnedSurface) && inferFileRole(filePath) === "docs") {
+    return "source";
+  }
+
+  if (fileSupportsSurface(filePath, learnedSurface) || inferFileRole(filePath) === "docs" || inferFileRole(filePath) === "config" || inferFileRole(filePath) === "fixture") {
+    return "supporting";
+  }
+
+  return "source";
+}
+
+function workflowActionsForFile(filePath: string, summary: FileDiffSummary | undefined, commit: CommitMetadata, learnedSurface: LearnedSurfaceMatch): WorkflowAction[] {
+  const normalized = path.normalize(filePath);
+  if (isNoisyEvidenceFile(normalized)) {
+    return [];
+  }
+
+  const actions = new Set<WorkflowAction>();
+  const role = inferFileRole(normalized);
+  const signals = [
+    ...(summary?.signals ?? []),
+    ...commit.diffSummary.signals.filter((signal) => path.normalize(signal.filePath) === normalized)
+  ];
+  const signalTypes = new Set(signals.map((signal) => signal.type));
+  const text = `${normalized} ${commit.message} ${signals.map((signal) => signal.value).join(" ")}`.toLowerCase();
+  const hasChangedLines = !summary || summary.addedLineCount > 0 || summary.deletedLineCount > 0;
+
+  if (isTestFile(normalized)) actions.add("added_test_case");
+  if (role === "docs") actions.add("updated_docs");
+  if (role === "fixture") actions.add("updated_fixture");
+  if (summary?.changedPackageScripts.length || signalTypes.has("package_script_changed")) actions.add("changed_package_script");
+  if (summary?.addedConfigKeys.length || signalTypes.has("config_changed")) actions.add("changed_config_key");
+  if (summary?.addedCliOptions.length || signals.some((signal) => signal.type === "cli_command_changed" && /^--/.test(signal.value))) actions.add("added_cli_option");
+  if (signals.some((signal) => signal.type === "cli_command_changed" && !/^--/.test(signal.value)) && learnedSurface.taskKind === "commands") actions.add("changed_cli_option");
+  if (summary?.addedRoutes.length || signalTypes.has("api_route_changed") || signalTypes.has("controller_changed")) actions.add("added_route_or_handler");
+  if (signalTypes.has("schema_changed") || signalTypes.has("model_or_entity_changed") || /(^|\/)(models?|entities?|schema)(\/|\.|$)/i.test(normalized)) actions.add("changed_schema_or_model");
+  if (signalTypes.has("query_changed") || signalTypes.has("migration_changed") || /(^|\/)(migrations?|queries?)(\/|$)|\.(sql|prisma)$/i.test(normalized)) actions.add("changed_query_or_migration");
+  if (signalTypes.has("validation_changed") || /(validat|schema|zod|yup)/i.test(text)) actions.add("changed_validation_logic");
+  if (/(error|errors|exception|failure|fail|panic|throw|catch)/i.test(text)) actions.add("changed_error_handling");
+  if (/(output|format|formatter|print|render|display|serialize|export)/i.test(text)) actions.add("changed_output_formatting");
+  if (isApiClientFile(normalized, learnedSurface)) actions.add("updated_api_client");
+  if (isUiComponentFile(normalized, learnedSurface)) actions.add("updated_component");
+  if (isStyleFile(normalized)) actions.add("updated_style");
+  if (summary && (summary.addedFunctions.length > 0 || signalTypes.has("function_added"))) actions.add("added_function");
+  if (summary && (summary.addedClasses.length > 0 || summary.addedInterfacesOrTypes.length > 0 || summary.addedEnums.length > 0 || signalTypes.has("class_added") || signalTypes.has("interface_or_type_added") || signalTypes.has("enum_added"))) {
+    actions.add("added_type_or_interface");
+  }
+  if (hasChangedLines && role === "source" && workflowActionGroup(normalized, learnedSurface) === "source" && !isStyleFile(normalized)) actions.add("modified_function");
+
+  return [...actions];
+}
+
+function isApiClientFile(filePath: string, learnedSurface: LearnedSurfaceMatch): boolean {
+  const lower = filePath.toLowerCase();
+  if (learnedSurface.taskKind === "api") {
+    return /(^|\/)(clients?|sdk|contracts?)(\/|$)|api[-_.]?client/.test(lower);
+  }
+  return /(^|\/)(api|client|clients|services)\/|(^|\/)(api|client|clients|services)\.(tsx?|jsx?)$|\/api\.(tsx?|jsx?)$|api[-_.]?client/.test(lower);
+}
+
+function isUiComponentFile(filePath: string, learnedSurface: LearnedSurfaceMatch): boolean {
+  const lower = filePath.toLowerCase();
+  return learnedSurface.taskKind === "ui" && /\.(tsx?|jsx?|vue|svelte|html)$/.test(lower) && /(^|\/)(components?|pages?|screens?|views?)(\/|$)/.test(lower);
+}
+
+function isStyleFile(filePath: string): boolean {
+  return /\.(css|scss|sass|less)$/i.test(filePath);
+}
+
+function dominantWorkflowGroup(counts: Map<WorkflowActionSummary["group"], number>): WorkflowActionSummary["group"] {
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || workflowGroupPriority(a[0]) - workflowGroupPriority(b[0]))[0]?.[0] ?? "source";
+}
+
+function workflowGroupPriority(group: WorkflowActionSummary["group"]): number {
+  return group === "source" ? 0 : group === "test" ? 1 : 2;
+}
+
+function workflowActionPriority(action: WorkflowAction, kind: SurfaceTaskKind | undefined): number {
+  const priorities: Record<WorkflowAction, number> = {
+    added_cli_option: kind === "commands" ? 0 : 4,
+    changed_cli_option: kind === "commands" ? 1 : 5,
+    added_route_or_handler: kind === "api" ? 0 : 6,
+    updated_component: kind === "ui" ? 0 : 6,
+    updated_api_client: kind === "ui" ? 1 : 7,
+    changed_schema_or_model: kind === "database" || kind === "api" ? 2 : 8,
+    changed_query_or_migration: kind === "database" ? 1 : 8,
+    changed_validation_logic: 3,
+    modified_function: 4,
+    added_function: 5,
+    added_type_or_interface: 6,
+    changed_error_handling: 7,
+    changed_output_formatting: 8,
+    updated_style: kind === "ui" ? 4 : 9,
+    changed_config_key: 10,
+    changed_package_script: 11,
+    added_test_case: 12,
+    updated_fixture: 13,
+    updated_docs: kind === "docs" ? 0 : 14
+  };
+  return priorities[action] ?? 99;
+}
+
+function workflowStepsForActions(actions: WorkflowActionSummary[], learnedSurface: LearnedSurfaceMatch, validationCommands: string[]): WorkflowStepEvidence[] {
+  const steps = actions
+    .map((action) => workflowStepForAction(action, learnedSurface))
+    .filter((step): step is WorkflowStepEvidence => Boolean(step))
+    .slice(0, 5);
+
+  if (validationCommands.length > 0 && steps.length > 0) {
+    steps.push({
+      action: "validation",
+      text: "Run the discovered validation command(s).",
+      count: validationCommands.length,
+      files: validationCommands
+    });
+  }
+
+  return steps;
+}
+
+function workflowStepForAction(summary: WorkflowActionSummary, learnedSurface: LearnedSurfaceMatch): WorkflowStepEvidence | undefined {
+  const kind = learnedSurface.taskKind ?? "source-workflow";
+  const stepText = workflowStepText(summary.action, kind);
+  if (!stepText) {
+    return undefined;
+  }
+
+  return {
+    action: summary.action,
+    text: stepText,
+    count: summary.count,
+    files: summary.files.slice(0, 3)
+  };
+}
+
+function workflowStepText(action: WorkflowAction, kind: SurfaceTaskKind): string | undefined {
+  const generic: Partial<Record<WorkflowAction, string>> = {
+    added_function: "Add helper functions only where repeated examples introduce new behavior.",
+    modified_function: "Update source behavior in the learned surface.",
+    added_type_or_interface: "Update shared types or interfaces used by the surface.",
+    changed_validation_logic: "Update validation logic alongside the source behavior.",
+    changed_error_handling: "Update error handling paths for the changed behavior.",
+    changed_output_formatting: "Update output formatting where the surface renders or prints results.",
+    changed_config_key: "Update configuration keys that directly support this surface.",
+    changed_package_script: "Update package scripts only when the surface workflow requires it.",
+    updated_docs: "Update documentation that directly describes this surface.",
+    updated_fixture: "Update fixtures that directly support the changed behavior.",
+    added_test_case: "Add or update tests that cover the changed behavior."
+  };
+
+  if (kind === "commands") {
+    const commandSteps: Partial<Record<WorkflowAction, string>> = {
+      added_cli_option: "Add or update command option parsing in the command module.",
+      changed_cli_option: "Update command dispatch, arguments, or option handling.",
+      modified_function: "Update command handler behavior in the learned command files.",
+      added_function: "Add command helper functions only when repeated examples do so.",
+      added_test_case: "Add or update command tests for the changed option or behavior.",
+      updated_fixture: "Update command fixtures only when output or behavior changes.",
+      changed_output_formatting: "Update command output formatting when examples change printed results.",
+      changed_error_handling: "Update command error handling for invalid input or failed execution."
+    };
+    return commandSteps[action] ?? generic[action];
+  }
+
+  if (kind === "ui") {
+    const uiSteps: Partial<Record<WorkflowAction, string>> = {
+      updated_component: "Update component, screen, or view behavior in the learned UI surface.",
+      updated_api_client: "Update API/client wiring used by the UI surface.",
+      updated_style: "Update styles that repeatedly co-change with this UI surface.",
+      added_test_case: "Add or update UI tests that cover the changed behavior.",
+      modified_function: "Update UI source behavior in the learned surface.",
+      changed_output_formatting: "Update display or rendering behavior when examples show formatting changes.",
+      changed_error_handling: "Update UI error states when examples show error handling changes."
+    };
+    return uiSteps[action] ?? generic[action];
+  }
+
+  if (kind === "api") {
+    const apiSteps: Partial<Record<WorkflowAction, string>> = {
+      added_route_or_handler: "Update route, controller, or handler behavior in the learned API surface.",
+      changed_schema_or_model: "Update schema or model code only when it co-changes with the API behavior.",
+      updated_api_client: "Update client contract or API client wiring when it co-changes.",
+      changed_validation_logic: "Update request validation alongside the API behavior.",
+      changed_error_handling: "Update API error handling for the changed route or handler.",
+      added_test_case: "Add or update API tests that cover the changed behavior.",
+      modified_function: "Update API source behavior in the learned surface."
+    };
+    return apiSteps[action] ?? generic[action];
+  }
+
+  if (kind === "database") {
+    const databaseSteps: Partial<Record<WorkflowAction, string>> = {
+      changed_query_or_migration: "Update migrations or queries in the learned database surface.",
+      changed_schema_or_model: "Update schema, model, or entity code together.",
+      added_test_case: "Add or update tests that cover the database-backed behavior."
+    };
+    return databaseSteps[action] ?? generic[action];
+  }
+
+  if (kind === "docs") {
+    return action === "updated_docs" ? "Update the documentation files in this learned docs surface." : generic[action];
+  }
+
+  return generic[action];
 }
 
 function falsePositiveNotes(signals: GenericSignal[], commits: CommitMetadata[], namingConfidence: number): string[] {
@@ -1112,8 +1613,10 @@ function falsePositiveNotes(signals: GenericSignal[], commits: CommitMetadata[],
   return notes.length > 0 ? notes : ["Review representative commits to confirm the proposed skill scope before adopting it."];
 }
 
-function toEvidenceCommit(commit: CommitMetadata): EvidenceCommit {
-  const changedFiles = nonNoisyFiles(commit.changedFiles);
+function toEvidenceCommit(commit: CommitMetadata, learnedSurface?: LearnedSurfaceMatch): EvidenceCommit {
+  const changedFiles = learnedSurface
+    ? surfaceRelevantFiles(commit.changedFiles, learnedSurface)
+    : nonNoisyFiles(commit.changedFiles);
   const evidenceFiles = changedFiles.length > 0 ? changedFiles : commit.changedFiles;
   return {
     hash: commit.hash,
@@ -1122,11 +1625,19 @@ function toEvidenceCommit(commit: CommitMetadata): EvidenceCommit {
     changedFiles: evidenceFiles,
     diffSignals: commit.diffSummary.signals
       .filter((signal) => !isNoisyEvidenceFile(signal.filePath))
+      .filter((signal) => !learnedSurface || fileDirectlyTouchesSurface(signal.filePath, learnedSurface) || fileSupportsSurface(signal.filePath, learnedSurface))
       .slice(0, 6)
       .map((signal) => `${signal.type}:${signal.value} (${signal.filePath})`),
-    pathSignals: commit.pathSignals.slice(0, 8),
+    pathSignals: topValues(evidenceFiles.flatMap(extractPathSignals), 8),
     url: commit.commitUrl
   };
+}
+
+function surfaceRelevantFiles(files: string[], surface: LearnedSurfaceMatch): string[] {
+  return unique(files.map((file) => path.normalize(file)))
+    .filter((file) => !isNoisyEvidenceFile(file))
+    .filter((file) => fileDirectlyTouchesSurface(file, surface) || fileSupportsSurface(file, surface) || fileCanSupportSurfaceWorkflow(file, surface))
+    .sort((a, b) => surfaceFileRank(a, surface) - surfaceFileRank(b, surface) || a.localeCompare(b));
 }
 
 function representativeCommits(commits: CommitMetadata[], dominantSignals: GenericSignal[]): CommitMetadata[] {
@@ -1616,7 +2127,7 @@ function isTaskSourceFile(taskArea: PrimaryArea, genericCategory: string, filePa
 }
 
 function isSurfaceSourceFile(filePath: string, learnedSurface?: LearnedSurfaceMatch): boolean {
-  if (isNoisyEvidenceFile(filePath) || isTestFile(filePath) || inferFileRole(filePath) !== "source") {
+  if (isNoisyEvidenceFile(filePath) || isTestFile(filePath)) {
     return false;
   }
 
@@ -1624,7 +2135,7 @@ function isSurfaceSourceFile(filePath: string, learnedSurface?: LearnedSurfaceMa
     return isSourceFile(filePath);
   }
 
-  return fileBelongsToLearnedSurfaceMatch(filePath, learnedSurface);
+  return isSurfaceImplementationEvidence(filePath, learnedSurface.taskKind ?? "source-workflow") && fileBelongsToLearnedSurfaceMatch(filePath, learnedSurface);
 }
 
 function fileBelongsToLearnedSurfaceMatch(filePath: string, surface: LearnedSurfaceMatch): boolean {
@@ -1704,24 +2215,27 @@ function decidePromotion(
   validationCommands: string[],
   proposedTaskName: string,
   taskArea: PrimaryArea,
-  learnedSurface?: LearnedSurfaceMatch
+  learnedSurface?: LearnedSurfaceMatch,
+  surfaceEvidenceCommitCount?: number,
+  workflowProfile?: WorkflowProfile
 ): PromotionDecision {
   const primary = primaryArea(commits);
-  const workflowQuality = calculateWorkflowQuality(commits, dominantSignals, evidenceFiles, validationCommands, learnedSurface);
+  const workflowQuality = calculateWorkflowQuality(commits, dominantSignals, evidenceFiles, validationCommands, learnedSurface, workflowProfile);
   const artifactShare = generatedArtifactEvidenceShare(commits);
   const representativeFileCount = representativeSourceTestFiles(evidenceFiles, learnedSurface).length;
   const taskSupport = taskEvidenceSupport(taskArea, genericCategory, evidenceFiles, dominantSignals, validationCommands, learnedSurface);
   const hasWorkflow = workflowQuality >= DRAFT_WORKFLOW_QUALITY
-    && actionableWorkflowKind(genericCategory, taskArea, terms, learnedSurface) !== "unknown"
+    && (workflowProfile ? workflowProfile.steps.length > 0 && !workflowProfile.usesGenericFallback : actionableWorkflowKind(genericCategory, taskArea, terms, learnedSurface) !== "unknown")
     && taskSupport.hasTaskSourceEvidence;
   const hasJunkName = hasObviousJunkName(proposedTaskName);
   const surfaceConfidence = learnedSurface?.confidence ?? 0;
   const surfaceShare = learnedSurface?.matchShare ?? 0;
   const strongSurface = isStrongLearnedSurface(learnedSurface);
+  const thresholdCommitCount = learnedSurface ? (surfaceEvidenceCommitCount ?? commits.length) : commits.length;
   const promotionPrimaryShare = strongSurface ? Math.max(primary.share, surfaceShare) : primary.share;
   const promotionArtifactShare = strongSurface ? Math.min(artifactShare, 0.2) : artifactShare;
   const agentReadyFailures = thresholdFailures({
-    commitCount: commits.length,
+    commitCount: thresholdCommitCount,
     patternConfidence,
     namingConfidence,
     primaryShare: promotionPrimaryShare,
@@ -1765,7 +2279,7 @@ function decidePromotion(
   }
 
   const draftFailures = thresholdFailures({
-    commitCount: commits.length,
+    commitCount: thresholdCommitCount,
     patternConfidence,
     namingConfidence,
     primaryShare: promotionPrimaryShare,
@@ -1868,8 +2382,26 @@ function calculateWorkflowQuality(
   dominantSignals: GenericSignal[],
   commonFiles: string[],
   validationCommands: string[],
-  learnedSurface?: LearnedSurfaceMatch
+  learnedSurface?: LearnedSurfaceMatch,
+  workflowProfile?: WorkflowProfile
 ): number {
+  if (workflowProfile) {
+    let score = 0;
+    const repeatedActions = workflowProfile.actions.filter((action) => action.count >= 2);
+    if (repeatedActions.length >= 3) score += 0.25;
+    else if (repeatedActions.length >= 2) score += 0.18;
+    else if (repeatedActions.length >= 1) score += 0.1;
+    if (workflowProfile.sourceActions.length > 0) score += 0.2;
+    if (workflowProfile.testActions.length > 0) score += 0.2;
+    if (workflowProfile.validationCommands.length > 0 || validationCommands.length > 0) score += 0.15;
+    if (workflowProfile.steps.length >= 3 && !workflowProfile.usesGenericFallback) score += 0.15;
+    else if (workflowProfile.steps.length > 0 && !workflowProfile.usesGenericFallback) score += 0.08;
+    if (commits.length >= 3) score += 0.05;
+    if (workflowProfile.usesGenericFallback) score -= 0.2;
+    if (generatedArtifactEvidenceShare(commits) > 0.35) score -= 0.15;
+    return Number(Math.max(0, Math.min(1, score)).toFixed(2));
+  }
+
   let score = 0;
   if (commonFiles.some((file) => isSurfaceSourceFile(file, learnedSurface))) score += 0.25;
   if (commonFiles.some(isTestFile) || (learnedSurface?.coChangingTestFiles.length ?? 0) > 0) score += 0.25;
@@ -2263,9 +2795,12 @@ function frameworkHints(commits: CommitMetadata[]): string[] {
   return topValues(commits.flatMap((commit) => commit.frameworkHints), 8);
 }
 
-function topDiffSignalLabels(commits: CommitMetadata[], limit: number): string[] {
+function topDiffSignalLabels(commits: CommitMetadata[], limit: number, learnedSurface?: LearnedSurfaceMatch): string[] {
   return topValues(
-    commits.flatMap((commit) => commit.diffSummary.signals.map((signal) => `${signal.type}:${signal.value} (${signal.filePath})`)),
+    commits.flatMap((commit) => commit.diffSummary.signals
+      .filter((signal) => !isNoisyEvidenceFile(signal.filePath))
+      .filter((signal) => !learnedSurface || fileDirectlyTouchesSurface(signal.filePath, learnedSurface) || fileSupportsSurface(signal.filePath, learnedSurface))
+      .map((signal) => `${signal.type}:${signal.value} (${signal.filePath})`)),
     limit
   );
 }

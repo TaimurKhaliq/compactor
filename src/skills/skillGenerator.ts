@@ -269,7 +269,9 @@ function renderLearnedSurface(candidate: CandidateSkill): string[] {
     `- Display name: ${surface.displayName}`,
     ...(surface.taskKind ? [`- Task kind: ${surface.taskKind}`] : []),
     `- Match confidence: ${formatConfidence(surface.confidence)}`,
-    `- Commit match share: ${formatConfidence(surface.matchShare)}`
+    `- Commit match share: ${formatConfidence(surface.matchShare)}`,
+    `- Evidence used: ${candidate.surfaceRelevantCommitCount ?? candidate.evidenceCommits.length} surface-relevant commits from ${candidate.rawEvidenceCommitCount ?? candidate.evidenceCommits.length} broad-cluster commits`,
+    `- Rejected evidence: ${candidate.rejectedEvidenceCommitCount ?? 0} noisy or unrelated commits`
   ];
 
   if (surface.representativeFiles.length > 0) {
@@ -413,6 +415,10 @@ function unique(values: string[]): string[] {
 }
 
 function renderWorkflow(candidate: CandidateSkill): string[] {
+  if (candidate.workflowProfile && candidate.workflowProfile.steps.length > 0 && !candidate.workflowProfile.usesGenericFallback) {
+    return candidate.workflowProfile.steps.map((step, index) => `${index + 1}. ${step.text}${workflowEvidenceHint(step.count, step.files)}`);
+  }
+
   if (candidate.learnedSurface?.taskKind === "commands") {
     return [
       "1. Start from the closest command module listed above.",
@@ -454,6 +460,15 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
     "4. Update docs or configuration only when the behavior change requires it.",
     "5. Run the validation commands below and review any changed generated artifacts separately."
   ];
+}
+
+function workflowEvidenceHint(count: number, files: string[]): string {
+  const parts = [
+    count > 0 ? `Observed in ${count} ${count === 1 ? "commit" : "commits"}` : "",
+    files.length > 0 ? `common files: ${files.slice(0, 2).join(", ")}` : ""
+  ].filter(Boolean);
+
+  return parts.length > 0 ? ` (${parts.join("; ")}).` : "";
 }
 
 function renderValidation(candidate: CandidateSkill): string[] {

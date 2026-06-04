@@ -24,6 +24,13 @@ test("detects CI, Docker, and config path signals", () => {
   assert.ok(extractPathSignals("config/runtime.yaml").includes("config_changed"));
 });
 
+test("does not classify generated docs progress HTML as UI", () => {
+  const signals = extractPathSignals("docs/progress/index.html");
+
+  assert.equal(signals.includes("ui_changed"), false);
+  assert.ok(signals.includes("docs_changed"));
+});
+
 test("detects SQL schema, index, and query changes from diffs", () => {
   const summary = parseUnifiedDiff([
     "diff --git a/db/schema.sql b/db/schema.sql",

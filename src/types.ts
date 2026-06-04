@@ -188,6 +188,52 @@ export interface EvidenceCommit {
   url?: string;
 }
 
+export type WorkflowAction =
+  | "added_function"
+  | "modified_function"
+  | "added_type_or_interface"
+  | "added_cli_option"
+  | "changed_cli_option"
+  | "added_route_or_handler"
+  | "changed_schema_or_model"
+  | "changed_query_or_migration"
+  | "changed_config_key"
+  | "changed_validation_logic"
+  | "changed_output_formatting"
+  | "changed_error_handling"
+  | "added_test_case"
+  | "updated_fixture"
+  | "updated_docs"
+  | "updated_api_client"
+  | "updated_component"
+  | "updated_style"
+  | "changed_package_script";
+
+export interface WorkflowActionSummary {
+  action: WorkflowAction;
+  count: number;
+  files: string[];
+  commits: string[];
+  group: "source" | "test" | "supporting";
+}
+
+export interface WorkflowStepEvidence {
+  action: WorkflowAction | "validation";
+  text: string;
+  count: number;
+  files: string[];
+}
+
+export interface WorkflowProfile {
+  actions: WorkflowActionSummary[];
+  sourceActions: WorkflowActionSummary[];
+  testActions: WorkflowActionSummary[];
+  supportingArtifactActions: WorkflowActionSummary[];
+  validationCommands: string[];
+  steps: WorkflowStepEvidence[];
+  usesGenericFallback: boolean;
+}
+
 export interface CandidateSkill {
   id: string;
   name: string;
@@ -204,10 +250,17 @@ export interface CandidateSkill {
   namingConfidence: number;
   confidence: number;
   evidenceCommits: EvidenceCommit[];
+  surfaceEvidenceCommits?: EvidenceCommit[];
+  supportingEvidenceCommits?: EvidenceCommit[];
+  rejectedEvidenceCommits?: EvidenceCommit[];
+  rawEvidenceCommitCount?: number;
+  surfaceRelevantCommitCount?: number;
+  rejectedEvidenceCommitCount?: number;
   commonFiles: string[];
   commonDirectories: string[];
   observedConventions: string[];
   observedChanges: string[];
+  workflowProfile?: WorkflowProfile;
   suggestedValidationCommands: string[];
   genericSignals: GenericSignal[];
   repeatedTerms: string[];

@@ -58,8 +58,21 @@ function renderCandidateSkills(candidates: CandidateSkill[]): string[] {
 
   return candidates.map((candidate) => {
     const directories = candidate.commonDirectories.slice(0, 2).join(", ") || "mixed directories";
-    return `- ${candidate.name} [${candidate.promotion_level}] (pattern ${Math.round(candidate.patternConfidence * 100)}%, naming ${Math.round(candidate.namingConfidence * 100)}%, workflow ${Math.round(candidate.workflowQuality * 100)}%): ${candidate.evidenceCommits.length} commits; common area: ${directories}`;
+    const evidenceSummary = renderEvidenceSummary(candidate);
+    return `- ${candidate.name} [${candidate.promotion_level}] (pattern ${Math.round(candidate.patternConfidence * 100)}%, naming ${Math.round(candidate.namingConfidence * 100)}%, workflow ${Math.round(candidate.workflowQuality * 100)}%): ${evidenceSummary}; common area: ${directories}`;
   });
+}
+
+function renderEvidenceSummary(candidate: CandidateSkill): string {
+  const raw = candidate.rawEvidenceCommitCount ?? candidate.evidenceCommits.length;
+  const relevant = candidate.surfaceRelevantCommitCount ?? candidate.evidenceCommits.length;
+  const rejected = candidate.rejectedEvidenceCommitCount ?? 0;
+
+  if (raw !== relevant || rejected > 0) {
+    return `${relevant} surface-relevant commits used; ${rejected} rejected as generated/progress noise from ${raw} raw cluster commits`;
+  }
+
+  return `${candidate.evidenceCommits.length} commits`;
 }
 
 function countArchivedOrDeprecatedSkills(repoRoot: string): number {

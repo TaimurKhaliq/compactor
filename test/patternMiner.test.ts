@@ -203,9 +203,10 @@ test("falls back to generic names when domain terms are weak", () => {
 
   assert.equal(docs.name, "Documentation Updates");
   assert.equal(docs.outputType, "pattern");
-  assert.equal(docs.genericFallbackName, "Update Documentation Pattern");
+  assert.equal(docs.genericFallbackName, "Update Documentation");
+  assert.equal(docs.learnedSurface?.taskKind, "docs");
   assert.deepEqual(docs.domainTerms, []);
-  assert.ok(docs.namingReasons.some((reason) => reason.includes("generic fallback used")));
+  assert.ok(docs.namingReasons.some((reason) => reason.includes("learned surface used for name")));
 });
 
 test("raises naming confidence when domain terms repeat across commits", () => {

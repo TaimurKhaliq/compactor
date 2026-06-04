@@ -154,6 +154,34 @@ test("reports duplicate draft handling counts", () => {
   assert.match(report, /Suppressed duplicate drafts: 1/);
 });
 
+test("reports raw, surface-relevant, and rejected evidence counts", () => {
+  const scan: ScanResult = {
+    repoRoot: "/tmp/example",
+    packageScripts: [],
+    validationCommands: [],
+    generatedAt: "2026-01-01T00:00:00Z",
+    commitsAnalyzed: 12,
+    commits: [],
+    repeatedPathPatterns: []
+  };
+  const candidate = {
+    ...candidateFixture("commands", "Update Commands", "agent_ready"),
+    rawEvidenceCommitCount: 12,
+    surfaceRelevantCommitCount: 8,
+    rejectedEvidenceCommitCount: 4
+  };
+  const mining: MiningResult = {
+    repoRoot: "/tmp/example",
+    generatedAt: "2026-01-01T00:00:00Z",
+    commitsAnalyzed: 12,
+    candidates: [candidate]
+  };
+
+  const report = generateReport(scan, mining);
+
+  assert.match(report, /8 surface-relevant commits used; 4 rejected as generated\/progress noise from 12 raw cluster commits/);
+});
+
 test("ignores __MACOSX archive directories in fallback archive count", () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "compactor-report-"));
 

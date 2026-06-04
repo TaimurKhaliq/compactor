@@ -29,6 +29,9 @@ function renderSkillExplanation(skill: CandidateSkill): string {
     "Confidence factors:",
     ...renderList(skill.confidenceFactors),
     "",
+    "Surface evidence filtering:",
+    ...renderSurfaceEvidenceFiltering(skill),
+    "",
     "Path signals:",
     ...renderList(skill.pathSignals),
     "",
@@ -58,6 +61,24 @@ function renderSkillExplanation(skill: CandidateSkill): string {
     ...skill.evidenceCommits.map(renderEvidenceCommit),
     ""
   ].join("\n");
+}
+
+function renderSurfaceEvidenceFiltering(skill: CandidateSkill): string[] {
+  const raw = skill.rawEvidenceCommitCount ?? skill.evidenceCommits.length;
+  const relevant = skill.surfaceRelevantCommitCount ?? skill.evidenceCommits.length;
+  const rejected = skill.rejectedEvidenceCommitCount ?? 0;
+
+  if (!skill.learnedSurface) {
+    return ["- No learned surface evidence filtering was applied."];
+  }
+
+  return [
+    `- Raw broad-cluster commits: ${raw}`,
+    `- Surface-relevant commits used: ${relevant}`,
+    `- Direct surface commits: ${skill.surfaceEvidenceCommits?.length ?? skill.evidenceCommits.length}`,
+    `- Supporting commits: ${skill.supportingEvidenceCommits?.length ?? 0}`,
+    `- Rejected noisy/unrelated commits: ${rejected}`
+  ];
 }
 
 function renderEvidenceCommit(commit: CandidateSkill["evidenceCommits"][number]): string {
