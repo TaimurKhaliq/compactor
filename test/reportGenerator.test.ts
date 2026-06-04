@@ -7,6 +7,7 @@ test("generates concise terminal report", () => {
   const scan: ScanResult = {
     repoRoot: "/tmp/example",
     packageScripts: ["test"],
+    validationCommands: ["npm test"],
     generatedAt: "2026-01-01T00:00:00Z",
     commitsAnalyzed: 5,
     commits: [],
@@ -20,16 +21,21 @@ test("generates concise terminal report", () => {
       {
         id: "build-project-grid",
         name: "Build Project Grid",
+        patternConfidence: 0.75,
+        namingConfidence: 0.62,
         confidence: 0.75,
         evidenceCommits: [
-          { hash: "1111111", shortHash: "1111111", message: "One", changedFiles: [], diffSignals: [] },
-          { hash: "2222222", shortHash: "2222222", message: "Two", changedFiles: [], diffSignals: [] }
+          { hash: "1111111", shortHash: "1111111", message: "One", changedFiles: [], diffSignals: [], pathSignals: [] },
+          { hash: "2222222", shortHash: "2222222", message: "Two", changedFiles: [], diffSignals: [], pathSignals: [] }
         ],
         commonFiles: [],
         commonDirectories: ["src/app/orders"],
         observedConventions: [],
         observedChanges: [],
         suggestedValidationCommands: [],
+        genericSignals: ["ui_changed"],
+        repeatedTerms: ["grid"],
+        frameworkHints: [],
         matchedPatterns: [],
         pathSignals: [],
         diffSignals: [],

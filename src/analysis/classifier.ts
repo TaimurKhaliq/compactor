@@ -1,4 +1,5 @@
 import { posix as path } from "node:path";
+import { summarizeCommitSignals } from "./genericSignals.js";
 import type { CommitMetadata, LikelyArea, PatternCount, RawCommit } from "../types.js";
 
 const TEST_PATTERNS = [
@@ -39,6 +40,7 @@ export function classifyCommit(commit: RawCommit): CommitMetadata {
   const touchedDirectories = uniqueSorted(commit.changedFiles.map(extractTouchedDirectory));
   const repeatedPathPatterns = uniqueSorted(commit.changedFiles.flatMap(extractFilePathPatterns));
   const likelyArea = classifyCommitArea(commit.changedFiles);
+  const signalSummary = summarizeCommitSignals(commit);
 
   return {
     ...commit,
@@ -46,7 +48,8 @@ export function classifyCommit(commit: RawCommit): CommitMetadata {
     fileExtensions,
     likelyArea,
     repeatedPathPatterns,
-    touchedDirectories
+    touchedDirectories,
+    ...signalSummary
   };
 }
 

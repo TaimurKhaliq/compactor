@@ -33,28 +33,40 @@ export function renderSkillMarkdown(candidate: CandidateSkill): string {
   return [
     `# ${candidate.name}`,
     "",
-    `Confidence: ${formatConfidence(candidate.confidence)}`,
+    `Proposed skill name: ${candidate.name}`,
+    `Pattern confidence: ${formatConfidence(candidate.patternConfidence)}`,
+    `Naming confidence: ${formatConfidence(candidate.namingConfidence)}`,
     "",
     "## When to use",
     renderWhenToUse(candidate),
     "",
+    "## Why Compactor proposed this",
+    candidate.rationale,
+    ...candidate.confidenceFactors.map((factor) => `- ${factor}`),
+    "",
+    "## Generic signals detected",
+    ...renderList(candidate.genericSignals),
+    "",
+    "## Common files/directories",
+    ...renderCommonFiles(candidate),
+    "",
+    "## Repeated terms",
+    ...renderList(candidate.repeatedTerms),
+    "",
     "## Nearest examples",
-    ...renderNearestExamples(candidate),
+    ...renderList(candidate.commonFiles.slice(0, 5)),
     "",
-    "## Observed changes",
-    ...candidate.observedChanges.map((change) => `- ${change}`),
-    "",
-    "## Observed repo conventions",
-    ...candidate.observedConventions.map((convention) => `- ${convention}`),
-    "",
-    "## Workflow",
-    ...renderWorkflow(candidate).map((step, index) => `${index + 1}. ${step}`),
+    "## Observed changes from diffs",
+    ...renderList(candidate.observedChanges),
     "",
     "## Validation",
     ...renderValidation(candidate),
     "",
     "## Evidence",
     ...candidate.evidenceCommits.slice(0, 5).map(renderEvidenceCommit),
+    "",
+    "## Possible false positives / needs human review",
+    ...renderList(candidate.falsePositiveNotes),
     ""
   ].join("\n");
 }
@@ -65,8 +77,8 @@ export function renderAgentsMarkdown(scan: ScanResult, mining: MiningResult): st
       ? ["- No repeated skill candidates were found in the scanned commit range yet."]
       : mining.candidates.map(
           (candidate) =>
-            `- ${candidate.name}: use .compactor/skills/${candidate.id}/SKILL.md when work matches ${candidate.matchedPatterns
-              .slice(0, 3)
+            `- ${candidate.name}: use .compactor/skills/${candidate.id}/SKILL.md when work matches ${candidate.genericSignals
+              .slice(0, 4)
               .join(", ") || "the observed commit evidence"}.`
         );
 
@@ -77,8 +89,8 @@ export function renderAgentsMarkdown(scan: ScanResult, mining: MiningResult): st
     "",
     "## Repository guidance",
     "- Start from the nearest existing implementation before introducing a new pattern.",
-    "- Keep generated agent instructions short, concrete, and tied to repository evidence.",
-    "- Validate changes with the commands listed in the matching skill draft.",
+    "- Match work to generated skills by generic signals, common directories, and representative evidence commits.",
+    "- Run only validation commands that exist in this repository.",
     "",
     "## Candidate skills",
     ...candidateLines,
@@ -92,113 +104,23 @@ export function renderAgentsMarkdown(scan: ScanResult, mining: MiningResult): st
 }
 
 function renderWhenToUse(candidate: CandidateSkill): string {
-  switch (candidate.id) {
-    case "build-project-grid":
-      return "Use this when implementing a new grid, table, search result screen, Kendo grid feature, or column-heavy UI.";
-    case "add-or-update-tests":
-      return "Use this when adding coverage for a feature, updating a spec after implementation changes, or extending e2e coverage.";
-    case "update-runtime-configuration":
-      return "Use this when changing environment files, JSON/YAML config, build config, or runtime settings.";
-    case "add-angular-feature":
-      return "Use this when adding or extending an Angular feature slice that touches component and service files together.";
-    case "add-api-endpoint":
-      return "Use this when adding a route, controller, resolver, endpoint handler, or API-facing feature with tests.";
-    case "add-or-update-cli-feature":
-      return "Use this when adding or changing a CLI command, CLI option, or command-line workflow.";
-    case "add-or-update-ui-server-feature":
-      return "Use this when changing the UI server together with UI implementation or UI tests.";
-    case "add-or-update-product-analysis-feature":
-      return "Use this when adding critic, audit, report, heuristic, or evidence-oriented product analysis behavior.";
-    default:
-      return `Use this when the task matches repeated history for ${candidate.name}.`;
-  }
+  const signals = candidate.genericSignals.slice(0, 5).join(", ") || "the repeated evidence pattern";
+  const directories = candidate.commonDirectories.slice(0, 3).join(", ") || "the common directories shown below";
+  return `Use this when a change resembles commits with ${signals}, especially around ${directories}.`;
 }
 
-function renderNearestExamples(candidate: CandidateSkill): string[] {
-  const examples = candidate.commonFiles.slice(0, 5);
-
-  if (examples.length === 0) {
-    return ["- No repeated nearest example files were detected."];
-  }
-
-  return examples.map((file) => `- ${file}`);
-}
-
-function renderWorkflow(candidate: CandidateSkill): string[] {
-  switch (candidate.id) {
-    case "build-project-grid":
-      return [
-        "Find the nearest existing grid or table implementation.",
-        "Reuse the existing column definition and data loading pattern.",
-        "Add search, reset, pagination, sorting, and export behavior only when the nearby example supports it.",
-        "Keep template, component, service, and model changes in the same feature area.",
-        "Add or update tests that cover the visible grid behavior when nearby examples include them.",
-        "Run the available validation scripts listed below."
-      ];
-    case "add-or-update-tests":
-      return [
-        "Identify the implementation files changed by the task.",
-        "Find the closest existing spec or e2e example for the same area.",
-        "Mirror the repository's assertion style, fixture setup, and naming pattern.",
-        "Cover the changed behavior rather than only snapshotting structure.",
-        "Run the narrow test first when the repo exposes one, then the available validation scripts listed below."
-      ];
-    case "update-runtime-configuration":
-      return [
-        "Find all environment/config files that define the same key family.",
-        "Update related JSON/YAML/env files together.",
-        "Check whether build, test, or deployment config needs the same setting.",
-        "Avoid hard-coded values when an existing config access pattern exists.",
-        "Run the available validation scripts listed below to catch malformed config."
-      ];
-    case "add-angular-feature":
-      return [
-        "Find the nearest Angular feature folder with component and service files.",
-        "Create or update the component TypeScript, template, styles, and service as one feature slice.",
-        "Reuse existing dependency injection, observable, form, and state patterns.",
-        "Add or update the companion .spec.ts file when nearby features have one.",
-        "Run the available validation scripts listed below."
-      ];
-    case "add-api-endpoint":
-      return [
-        "Find the closest route or handler from the nearest examples.",
-        "Mirror request parsing, response shape, and error handling.",
-        "Update nearby tests when the evidence shows endpoint changes are tested together.",
-        "Run the available validation scripts listed below."
-      ];
-    case "add-or-update-cli-feature":
-      return [
-        "Find the nearest command or option wiring.",
-        "Mirror argument parsing, output formatting, and error handling.",
-        "Update tests for the command behavior or option branch.",
-        "Run the available validation scripts listed below."
-      ];
-    case "add-or-update-ui-server-feature":
-      return [
-        "Start from the nearest server/uiServer.ts handler or server-side UI helper.",
-        "Keep UI server behavior aligned with the matching UI component or UI test.",
-        "Update UI tests when the visible behavior changes.",
-        "Run the available validation scripts listed below."
-      ];
-    case "add-or-update-product-analysis-feature":
-      return [
-        "Find the nearest critic, audit, report, heuristic, or evidence module.",
-        "Reuse the existing input, scoring, evidence, and report-shape conventions.",
-        "Update focused tests for the product-analysis behavior.",
-        "Run the available validation scripts listed below."
-      ];
-    default:
-      return [
-        "Find the nearest existing implementation matching the evidence.",
-        "Reuse its naming, file layout, and validation pattern.",
-        "Update tests or config if the matching evidence usually includes them."
-      ];
-  }
+function renderCommonFiles(candidate: CandidateSkill): string[] {
+  const lines: string[] = [];
+  lines.push("- Common files:");
+  lines.push(...renderList(candidate.commonFiles.slice(0, 8)));
+  lines.push("- Common directories:");
+  lines.push(...renderList(candidate.commonDirectories.slice(0, 6)));
+  return lines;
 }
 
 function renderValidation(candidate: CandidateSkill): string[] {
   if (candidate.suggestedValidationCommands.length === 0) {
-    return ["- No package.json validation scripts detected."];
+    return ["- No confident validation command discovered."];
   }
 
   return candidate.suggestedValidationCommands.map((command) => `- ${command}`);
@@ -208,6 +130,14 @@ function renderEvidenceCommit(commit: CandidateSkill["evidenceCommits"][number])
   const label = commit.url ? `[${commit.shortHash}](${commit.url})` : `\`${commit.shortHash}\``;
   const signals = commit.diffSignals.length > 0 ? ` (${commit.diffSignals.slice(0, 2).join("; ")})` : "";
   return `- ${label}: ${commit.message}${signals}`;
+}
+
+function renderList(items: string[]): string[] {
+  if (items.length === 0) {
+    return ["- None"];
+  }
+
+  return items.map((item) => `- ${item}`);
 }
 
 function formatConfidence(confidence: number): string {

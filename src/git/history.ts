@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { classifyCommit, collectRepeatedPathPatterns } from "../analysis/classifier.js";
 import { parseUnifiedDiff } from "./diffParser.js";
-import { readPackageScripts } from "./packageScripts.js";
+import { discoverValidationCommands, readPackageScripts } from "./packageScripts.js";
 import { prepareRepository } from "./repository.js";
 import type { RawCommit, ScanResult } from "../types.js";
 
@@ -25,6 +25,7 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
   const limit = normalizeLimit(options.limit);
   const remoteUrl = getRemoteWebUrl(repoRoot);
   const packageScripts = readPackageScripts(repoRoot);
+  const validationCommands = discoverValidationCommands(repoRoot);
   const rawCommits = readRawCommits(repoRoot, limit);
   const commits = rawCommits.map((commit) => {
     const metadata = classifyCommit(commit);
@@ -41,6 +42,7 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
     workspacePath: target.workspacePath,
     remoteUrl,
     packageScripts,
+    validationCommands,
     generatedAt: new Date().toISOString(),
     commitsAnalyzed: commits.length,
     commits,

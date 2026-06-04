@@ -46,6 +46,6 @@ function renderCandidateSkills(candidates: CandidateSkill[]): string[] {
 
   return candidates.map((candidate) => {
     const directories = candidate.commonDirectories.slice(0, 2).join(", ") || "mixed directories";
-    return `- ${candidate.name} (${Math.round(candidate.confidence * 100)}%): ${candidate.evidenceCommits.length} commits; common area: ${directories}`;
+    return `- ${candidate.name} (pattern ${Math.round(candidate.patternConfidence * 100)}%, naming ${Math.round(candidate.namingConfidence * 100)}%): ${candidate.evidenceCommits.length} commits; common area: ${directories}`;
   });
 }

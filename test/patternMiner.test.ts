@@ -2,169 +2,128 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyCommit, collectRepeatedPathPatterns } from "../src/analysis/classifier.js";
 import { minePatterns } from "../src/analysis/patternMiner.js";
-import type { ScanResult } from "../src/types.js";
+import type { DiffSignal, ScanResult } from "../src/types.js";
 import { diffSummaryWithSignals, emptyDiffSummary } from "./helpers.js";
 
-test("mines deterministic candidate skills from repeated commit evidence", () => {
+test("detects backend route, service, and test clusters", () => {
   const commits = [
-    classifyCommit({
-      hash: "1111111111111111",
-      date: "2026-01-01T00:00:00Z",
-      message: "Add orders grid",
-      diffSummary: emptyDiffSummary(),
-      changedFiles: [
-        "src/app/orders/orders-grid.component.ts",
-        "src/app/orders/orders-grid.component.html",
-        "src/app/orders/orders.service.ts",
-        "src/app/orders/orders-grid.component.spec.ts"
-      ]
-    }),
-    classifyCommit({
-      hash: "2222222222222222",
-      date: "2026-01-02T00:00:00Z",
-      message: "Add invoices table",
-      diffSummary: emptyDiffSummary(),
-      changedFiles: [
-        "src/app/invoices/invoices-table.component.ts",
-        "src/app/invoices/invoices-table.component.scss",
-        "src/app/invoices/invoices.service.ts",
-        "e2e/invoices-table.spec.ts"
-      ]
-    }),
-    classifyCommit({
-      hash: "3333333333333333",
-      date: "2026-01-03T00:00:00Z",
-      message: "Update staging config",
-      diffSummary: emptyDiffSummary(),
-      changedFiles: ["src/environments/environment.staging.ts", "angular.json"]
-    }),
-    classifyCommit({
-      hash: "4444444444444444",
-      date: "2026-01-04T00:00:00Z",
-      message: "Update api config",
-      diffSummary: emptyDiffSummary(),
-      changedFiles: ["config/runtime.json", "package.json"]
-    })
+    commit("1111111111111111", "Add user route", ["src/routes/users.ts", "src/services/userService.ts", "tests/users.integration.test.ts"], [
+      { type: "api_route_changed", value: "GET /users", filePath: "src/routes/users.ts" },
+      { type: "function_added", value: "getUsers", filePath: "src/services/userService.ts" },
+      { type: "test_case_added", value: "returns users", filePath: "tests/users.integration.test.ts" }
+    ]),
+    commit("2222222222222222", "Add order route", ["src/routes/orders.ts", "src/services/orderService.ts", "tests/orders.integration.test.ts"], [
+      { type: "api_route_changed", value: "POST /orders", filePath: "src/routes/orders.ts" },
+      { type: "function_added", value: "createOrder", filePath: "src/services/orderService.ts" },
+      { type: "test_case_added", value: "creates order", filePath: "tests/orders.integration.test.ts" }
+    ])
   ];
 
-  const scan: ScanResult = {
+  const result = minePatterns(scan(commits, ["npm test"]));
+  const backend = result.candidates.find((candidate) => candidate.name === "Add or Update Backend API Feature");
+
+  assert.ok(backend);
+  assert.ok(backend.patternConfidence > 0.6);
+  assert.ok(backend.namingConfidence > 0.8);
+  assert.ok(backend.genericSignals.includes("api_route_changed"));
+  assert.ok(backend.genericSignals.includes("service_layer_changed"));
+});
+
+test("avoids false API labels when backend paths lack route diff signals", () => {
+  const commits = [
+    commit("aaaaaaaaaaaaaaaa", "Refactor server cache", ["server/cache.ts", "tests/cache.test.ts"], []),
+    commit("bbbbbbbbbbbbbbbb", "Update server logging", ["server/logger.ts", "tests/logger.test.ts"], [])
+  ];
+
+  const result = minePatterns(scan(commits, ["npm test"]));
+
+  assert.equal(result.candidates.some((candidate) => /API/.test(candidate.name)), false);
+});
+
+test("detects backend plus database plus test clustering", () => {
+  const commits = [
+    commit("1111111111111111", "Add account persistence", ["src/models/account.entity.ts", "src/repositories/accountRepository.ts", "migrations/001_accounts.sql", "tests/account.test.ts"], [
+      { type: "schema_changed", value: "create table accounts", filePath: "migrations/001_accounts.sql" },
+      { type: "class_added", value: "AccountEntity", filePath: "src/models/account.entity.ts" },
+      { type: "test_case_added", value: "saves account", filePath: "tests/account.test.ts" }
+    ]),
+    commit("2222222222222222", "Add invoice persistence", ["src/models/invoice.entity.ts", "src/repositories/invoiceRepository.ts", "migrations/002_invoices.sql", "tests/invoice.test.ts"], [
+      { type: "schema_changed", value: "create table invoices", filePath: "migrations/002_invoices.sql" },
+      { type: "class_added", value: "InvoiceEntity", filePath: "src/models/invoice.entity.ts" },
+      { type: "test_case_added", value: "saves invoice", filePath: "tests/invoice.test.ts" }
+    ])
+  ];
+
+  const result = minePatterns(scan(commits, ["npm test"]));
+
+  assert.ok(result.candidates.some((candidate) => candidate.name === "Add or Update Database-Backed Feature"));
+});
+
+test("detects full-stack feature clustering without repo-specific paths", () => {
+  const commits = [
+    commit("1111111111111111", "Add profile screen", ["frontend/src/components/Profile.tsx", "backend/routes/profile.ts", "tests/profile.test.ts"], [
+      { type: "api_route_changed", value: "GET /profile", filePath: "backend/routes/profile.ts" },
+      { type: "function_added", value: "Profile", filePath: "frontend/src/components/Profile.tsx" },
+      { type: "test_case_added", value: "renders profile", filePath: "tests/profile.test.ts" }
+    ]),
+    commit("2222222222222222", "Add settings screen", ["frontend/src/components/Settings.tsx", "backend/routes/settings.ts", "tests/settings.test.ts"], [
+      { type: "api_route_changed", value: "GET /settings", filePath: "backend/routes/settings.ts" },
+      { type: "function_added", value: "Settings", filePath: "frontend/src/components/Settings.tsx" },
+      { type: "test_case_added", value: "renders settings", filePath: "tests/settings.test.ts" }
+    ])
+  ];
+
+  const result = minePatterns(scan(commits, ["npm test"]));
+
+  assert.ok(result.candidates.some((candidate) => candidate.name === "Add or Update Backend API Feature" || candidate.name === "Update Full-Stack Feature Pattern"));
+});
+
+test("uses only discovered validation commands", () => {
+  const commits = [
+    commit("aaaaaaaaaaaaaaaa", "Add CLI audit command", ["src/cli/index.ts", "tests/cli.test.ts"], [
+      { type: "cli_command_changed", value: "audit", filePath: "src/cli/index.ts" }
+    ]),
+    commit("bbbbbbbbbbbbbbbb", "Add CLI format option", ["src/cli/index.ts", "tests/cli.test.ts"], [
+      { type: "cli_command_changed", value: "--format", filePath: "src/cli/index.ts" }
+    ])
+  ];
+
+  const result = minePatterns(scan(commits, ["npm test", "npm run typecheck"]));
+  assert.deepEqual(result.candidates[0]?.suggestedValidationCommands, ["npm test", "npm run typecheck"]);
+});
+
+test("tracks naming confidence separately from pattern confidence", () => {
+  const commits = [
+    commit("1111111111111111", "Update notes", ["docs/notes.md"], []),
+    commit("2222222222222222", "Update guide", ["docs/guide.md"], [])
+  ];
+
+  const result = minePatterns(scan(commits, []));
+  const docs = result.candidates[0];
+
+  assert.ok(docs);
+  assert.ok(docs.patternConfidence > 0.5);
+  assert.ok(docs.namingConfidence < docs.patternConfidence);
+});
+
+function commit(hash: string, message: string, changedFiles: string[], signals: DiffSignal[]) {
+  return classifyCommit({
+    hash,
+    date: "2026-01-01T00:00:00Z",
+    message,
+    diffSummary: signals.length > 0 ? diffSummaryWithSignals(signals) : emptyDiffSummary(),
+    changedFiles
+  });
+}
+
+function scan(commits: ReturnType<typeof commit>[], validationCommands: string[]): ScanResult {
+  return {
     repoRoot: "/tmp/example",
-    packageScripts: ["build", "test"],
+    packageScripts: [],
+    validationCommands,
     generatedAt: "2026-01-05T00:00:00Z",
     commitsAnalyzed: commits.length,
     commits,
     repeatedPathPatterns: collectRepeatedPathPatterns(commits)
   };
-
-  const result = minePatterns(scan);
-  const names = result.candidates.map((candidate) => candidate.name);
-
-  assert.ok(names.includes("Build Project Grid"));
-  assert.ok(names.includes("Add or Update Tests"));
-  assert.ok(names.includes("Update Runtime Configuration"));
-  assert.ok(names.includes("Add Angular Feature"));
-
-  const grid = result.candidates.find((candidate) => candidate.name === "Build Project Grid");
-  assert.ok(grid);
-  assert.equal(grid.evidenceCommits.length, 2);
-  assert.ok(grid.confidence > 0.5);
-});
-
-test("avoids API endpoint candidates when server paths lack route diff signals", () => {
-  const commits = [
-    classifyCommit({
-      hash: "aaaaaaaaaaaaaaaa",
-      date: "2026-01-01T00:00:00Z",
-      message: "Refactor server internals",
-      diffSummary: emptyDiffSummary(),
-      changedFiles: ["server/cache.ts", "tests/cache.test.ts"]
-    }),
-    classifyCommit({
-      hash: "bbbbbbbbbbbbbbbb",
-      date: "2026-01-02T00:00:00Z",
-      message: "Update server logging",
-      diffSummary: emptyDiffSummary(),
-      changedFiles: ["server/logger.ts", "tests/logger.test.ts"]
-    })
-  ];
-
-  const result = minePatterns({
-    repoRoot: "/tmp/example",
-    packageScripts: ["test"],
-    generatedAt: "2026-01-03T00:00:00Z",
-    commitsAnalyzed: commits.length,
-    commits,
-    repeatedPathPatterns: collectRepeatedPathPatterns(commits)
-  });
-
-  assert.equal(result.candidates.some((candidate) => candidate.id === "add-api-endpoint"), false);
-});
-
-test("detects UI server feature candidates from uiServer plus UI evidence", () => {
-  const commits = [
-    classifyCommit({
-      hash: "aaaaaaaaaaaaaaaa",
-      date: "2026-01-01T00:00:00Z",
-      message: "Add UI graph endpoint",
-      diffSummary: diffSummaryWithSignals([
-        { type: "api-route", value: "GET /api/graph", filePath: "server/uiServer.ts" },
-        { type: "test-name", value: "renders graph", filePath: "ui/tests/App.test.tsx" }
-      ]),
-      changedFiles: ["server/uiServer.ts", "ui/src/App.tsx", "ui/tests/App.test.tsx"]
-    }),
-    classifyCommit({
-      hash: "bbbbbbbbbbbbbbbb",
-      date: "2026-01-02T00:00:00Z",
-      message: "Add UI run details",
-      diffSummary: diffSummaryWithSignals([
-        { type: "api-route", value: "GET /api/runs/:id", filePath: "server/uiServer.ts" },
-        { type: "test-name", value: "shows run details", filePath: "ui/tests/App.test.tsx" }
-      ]),
-      changedFiles: ["server/uiServer.ts", "ui/src/components/RunDetails.tsx", "ui/tests/App.test.tsx"]
-    })
-  ];
-
-  const result = minePatterns({
-    repoRoot: "/tmp/example",
-    packageScripts: ["test", "build", "ui:test"],
-    generatedAt: "2026-01-03T00:00:00Z",
-    commitsAnalyzed: commits.length,
-    commits,
-    repeatedPathPatterns: collectRepeatedPathPatterns(commits)
-  });
-
-  assert.ok(result.candidates.some((candidate) => candidate.id === "add-or-update-ui-server-feature"));
-  assert.ok(result.candidates.some((candidate) => candidate.id === "add-api-endpoint"));
-});
-
-test("uses only package scripts that exist for validation commands", () => {
-  const commits = [
-    classifyCommit({
-      hash: "aaaaaaaaaaaaaaaa",
-      date: "2026-01-01T00:00:00Z",
-      message: "Add CLI command",
-      diffSummary: diffSummaryWithSignals([{ type: "cli-command", value: "audit", filePath: "src/cli/index.ts" }]),
-      changedFiles: ["src/cli/index.ts", "tests/cli.test.ts"]
-    }),
-    classifyCommit({
-      hash: "bbbbbbbbbbbbbbbb",
-      date: "2026-01-02T00:00:00Z",
-      message: "Add CLI option",
-      diffSummary: diffSummaryWithSignals([{ type: "cli-option", value: "--format", filePath: "src/cli/index.ts" }]),
-      changedFiles: ["src/cli/index.ts", "tests/cli.test.ts"]
-    })
-  ];
-
-  const result = minePatterns({
-    repoRoot: "/tmp/example",
-    packageScripts: ["test", "typecheck"],
-    generatedAt: "2026-01-03T00:00:00Z",
-    commitsAnalyzed: commits.length,
-    commits,
-    repeatedPathPatterns: collectRepeatedPathPatterns(commits)
-  });
-
-  const cli = result.candidates.find((candidate) => candidate.id === "add-or-update-cli-feature");
-  assert.ok(cli);
-  assert.deepEqual(cli.suggestedValidationCommands, ["npm test", "npm run typecheck"]);
-});
+}

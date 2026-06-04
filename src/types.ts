@@ -1,16 +1,57 @@
 export type LikelyArea = "frontend" | "backend" | "tests" | "config" | "docs" | "mixed" | "unknown";
 export type FileChangeStatus = "added" | "modified" | "deleted" | "renamed" | "unknown";
+export type GenericSignal =
+  | "ui_changed"
+  | "component_changed"
+  | "page_or_screen_changed"
+  | "route_view_changed"
+  | "style_changed"
+  | "frontend_test_changed"
+  | "backend_changed"
+  | "api_route_changed"
+  | "controller_changed"
+  | "service_layer_changed"
+  | "repository_or_dao_changed"
+  | "middleware_changed"
+  | "auth_changed"
+  | "validation_changed"
+  | "serialization_changed"
+  | "background_job_changed"
+  | "queue_or_event_handler_changed"
+  | "db_changed"
+  | "migration_changed"
+  | "schema_changed"
+  | "model_or_entity_changed"
+  | "seed_data_changed"
+  | "query_changed"
+  | "index_changed"
+  | "config_changed"
+  | "env_changed"
+  | "package_or_dependency_changed"
+  | "ci_changed"
+  | "docker_changed"
+  | "terraform_or_infra_changed"
+  | "deployment_changed"
+  | "unit_test_changed"
+  | "integration_test_changed"
+  | "e2e_test_changed"
+  | "contract_test_changed"
+  | "fixture_changed"
+  | "test_case_added"
+  | "exported_symbol_added"
+  | "function_added"
+  | "class_added"
+  | "interface_or_type_added"
+  | "enum_added"
+  | "cli_command_changed"
+  | "package_script_changed"
+  | "docs_changed"
+  | "readme_changed"
+  | "adr_or_design_doc_changed"
+  | "changelog_changed";
 
 export interface DiffSignal {
-  type:
-    | "exported-symbol"
-    | "test-name"
-    | "cli-command"
-    | "cli-option"
-    | "package-script"
-    | "config-key"
-    | "api-route"
-    | "route-handler";
+  type: GenericSignal;
   value: string;
   filePath: string;
   detail?: string;
@@ -23,6 +64,10 @@ export interface FileDiffSummary {
   addedLineCount: number;
   deletedLineCount: number;
   addedExports: string[];
+  addedFunctions: string[];
+  addedClasses: string[];
+  addedInterfacesOrTypes: string[];
+  addedEnums: string[];
   addedTestNames: string[];
   addedCliCommands: string[];
   addedCliOptions: string[];
@@ -53,6 +98,12 @@ export interface CommitMetadata extends RawCommit {
   likelyArea: LikelyArea;
   repeatedPathPatterns: string[];
   touchedDirectories: string[];
+  pathSignals: GenericSignal[];
+  diffSignals: GenericSignal[];
+  genericSignals: GenericSignal[];
+  frameworkHints: string[];
+  filenameTerms: string[];
+  messageTerms: string[];
   commitUrl?: string;
 }
 
@@ -69,6 +120,7 @@ export interface ScanResult {
   workspacePath?: string;
   remoteUrl?: string;
   packageScripts: string[];
+  validationCommands: string[];
   generatedAt: string;
   commitsAnalyzed: number;
   commits: CommitMetadata[];
@@ -81,12 +133,15 @@ export interface EvidenceCommit {
   message: string;
   changedFiles: string[];
   diffSignals: string[];
+  pathSignals: string[];
   url?: string;
 }
 
 export interface CandidateSkill {
   id: string;
   name: string;
+  patternConfidence: number;
+  namingConfidence: number;
   confidence: number;
   evidenceCommits: EvidenceCommit[];
   commonFiles: string[];
@@ -94,6 +149,9 @@ export interface CandidateSkill {
   observedConventions: string[];
   observedChanges: string[];
   suggestedValidationCommands: string[];
+  genericSignals: GenericSignal[];
+  repeatedTerms: string[];
+  frameworkHints: string[];
   matchedPatterns: string[];
   pathSignals: string[];
   diffSignals: string[];

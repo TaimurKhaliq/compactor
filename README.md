@@ -10,7 +10,7 @@ git history -> bounded diff summaries -> repeated patterns -> candidate skills -
 
 ## Why
 
-AI coding agents often spend tokens rediscovering the same project conventions: where grid components live, how tests are named, how config is wired, and which validation commands matter. Compactor extracts those repeated patterns from commits and drafts compact guidance that can be reviewed and reused with Codex, Copilot-style agents, or repository `AGENTS.md` files.
+AI coding agents often spend tokens rediscovering the same project conventions: how API changes are tested, where UI components live, how migrations pair with models, how CI/config changes are validated, and which commands matter. Compactor extracts those repeated patterns from commits and drafts compact guidance that can be reviewed and reused with Codex, Copilot-style agents, or repository `AGENTS.md` files.
 
 ## Install
 
@@ -61,8 +61,8 @@ If that workspace already exists, Compactor runs `git pull --ff-only` before ana
 Explains why a candidate skill was generated.
 
 ```bash
-compactor explain add-or-update-cli-feature
-compactor explain add-or-update-ui-server-feature https://github.com/org/repo.git --limit 100
+compactor explain add-or-update-backend-api-feature-api-route-changed-service-layer-changed
+compactor explain update-build-or-ci-configuration-ci-changed-config-changed https://github.com/org/repo.git --limit 100
 ```
 
 The explanation includes:
@@ -70,7 +70,8 @@ The explanation includes:
 - evidence commits
 - path signals
 - structured diff signals
-- confidence factors
+- repeated terms used for naming
+- pattern and naming confidence factors
 - possible false-positive notes
 
 ### `compactor scan`
@@ -92,7 +93,8 @@ Captured metadata includes:
 - file extensions
 - likely area: frontend, backend, tests, config, docs, mixed, or unknown
 - repeated file path patterns
-- added exports, test names, CLI commands/options, package scripts, config keys, and route/handler patterns visible in added lines
+- generic path signals across frontend, backend, database, infrastructure, tests, and docs
+- generic diff signals such as added functions/classes/types, test cases, CLI commands, package scripts, SQL schema/index/query changes, and route/handler patterns visible in added lines
 
 ### `compactor mine`
 
@@ -103,16 +105,22 @@ compactor mine --limit 75
 compactor mine --json
 ```
 
-Current deterministic rules create candidates such as:
+Compactor now mines generic change shapes rather than fixed repo-specific rules. It clusters commits by:
 
-- `Build Project Grid` when multiple commits touch files or messages containing `grid`, `kendo`, `table`, or `columns`
-- `Add or Update Tests` when multiple commits touch `.spec.ts`, `.test.*`, `playwright`, `e2e`, `cypress`, or `__tests__`
-- `Update Runtime Configuration` when multiple commits touch environment, config, JSON, or YAML files
-- `Add Angular Feature` when multiple commits touch Angular component and service files together
-- `Add API Endpoint` only when diffs show added route or handler patterns
-- `Add or Update CLI Feature` when diffs show added CLI commands or options
-- `Add or Update UI Server Feature` when `server/uiServer.ts` changes with UI files or UI tests
-- `Add or Update Product Analysis Feature` when commits repeatedly involve critic, audit, report, heuristic, or evidence files
+- repeated generic signals, such as `api_route_changed`, `service_layer_changed`, `migration_changed`, `component_changed`, `ci_changed`, or `unit_test_changed`
+- overlapping directories and filenames
+- repeated commit-message and filename terms
+- lightweight framework/language hints
+
+Candidate names are proposed from evidence. Examples:
+
+- `Add or Update Backend API Feature`
+- `Add or Update Database-Backed Feature`
+- `Update Database Schema and Queries`
+- `Add or Update Async Job/Event Handler`
+- `Add or Update UI Component Feature`
+- `Update Build or CI Configuration`
+- fallback names such as `Update Backend and Test Pattern` or `Update Full-Stack Feature Pattern` when semantic naming confidence is lower
 
 ### `compactor generate`
 
@@ -130,15 +138,20 @@ Output:
 
 Each generated skill includes:
 
+- proposed skill name
+- pattern confidence and naming confidence
 - when to use
-- examples
-- workflow steps
-- observed repo conventions
-- observed diff-level changes
-- validation checklist
-- evidence commits
+- why Compactor proposed it
+- generic signals detected
+- common files/directories
+- repeated terms
+- nearest examples
+- observed changes from diffs
+- validation commands
+- top 5 representative evidence commits
+- possible false-positive notes
 
-Validation commands are generated only from scripts that exist in the target repository's `package.json`, preferring `test`, `build`, `typecheck`, `lint`, `e2e`, and `ui:test`.
+Validation commands are generated only when Compactor can discover them from the target repository, including package scripts, Makefile targets, Maven/Gradle files, Python test hints, Go/.NET/Rust project files, and simple CI workflow commands.
 
 ### `compactor report`
 
@@ -160,7 +173,7 @@ The report includes:
 See:
 
 - `examples/generated-output/AGENTS.md`
-- `examples/generated-output/skills/build-project-grid/SKILL.md`
+- `examples/generated-output/skills/add-or-update-backend-api-feature/SKILL.md`
 
 ## Development
 
@@ -177,7 +190,9 @@ src/git/history.ts
 src/git/diffParser.ts
 src/git/packageScripts.ts
 src/git/repository.ts
+src/analysis/genericSignals.ts
 src/analysis/classifier.ts
+src/analysis/detectors/
 src/analysis/patternMiner.ts
 src/skills/skillGenerator.ts
 src/report/reportGenerator.ts
@@ -187,6 +202,5 @@ src/types.ts
 ## Extension Ideas
 
 - Add embeddings or LLM clustering after the deterministic cache is stable.
-- Add package manager detection for validation commands.
-- Add richer framework-specific miners for Rails, Django, Next.js, Angular, or .NET.
+- Add richer semantic grouping for framework-specific conventions after the generic signal cache is stable.
 - Add a review mode that compares generated skills against the current repository `AGENTS.md`.

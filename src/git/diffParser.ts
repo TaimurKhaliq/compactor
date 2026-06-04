@@ -15,14 +15,37 @@ interface MutableFileDiff {
   patchLines: PatchLine[];
 }
 
-const EXPORT_PATTERN = /\bexport\s+(?:async\s+)?(?:abstract\s+)?(function|class|interface|type)\s+([A-Za-z_$][\w$]*)/;
+interface SignalBuildValues {
+  addedExports: string[];
+  addedFunctions: string[];
+  addedClasses: string[];
+  addedInterfacesOrTypes: string[];
+  addedEnums: string[];
+  addedTestNames: string[];
+  addedCliCommands: string[];
+  addedCliOptions: string[];
+  changedPackageScripts: string[];
+  addedConfigKeys: string[];
+  addedRoutes: string[];
+  sqlSignals: DiffSignal["type"][];
+}
+
+const EXPORT_PATTERN = /\bexport\s+(?:async\s+)?(?:abstract\s+)?(function|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/;
+const FUNCTION_PATTERN =
+  /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b|^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(|\b(?:public|private|protected|internal|static|\s)+[\w<>,\[\]?]+\s+([A-Za-z_]\w*)\s*\(/;
+const CLASS_PATTERN = /\b(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)\b|^\s*class\s+([A-Za-z_]\w*)\b/;
+const INTERFACE_OR_TYPE_PATTERN = /\b(?:export\s+)?(?:interface|type)\s+([A-Za-z_$][\w$]*)\b|\b(?:public\s+)?interface\s+([A-Za-z_]\w*)\b/;
+const ENUM_PATTERN = /\b(?:export\s+)?enum\s+([A-Za-z_$][\w$]*)\b|\b(?:public\s+)?enum\s+([A-Za-z_]\w*)\b/;
 const TEST_NAME_PATTERN = /\b(?:describe|it|test)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])([^'"`]+)\1/g;
 const CLI_COMMAND_PATTERN = /\.(?:command|commandDir)\s*\(\s*(['"`])([^'"`\s)]+)\1|\bcommand\s*:\s*(['"`])([^'"`]+)\3/g;
 const CLI_OPTION_PATTERN = /\.(?:option|requiredOption)\s*\(\s*(['"`])([^'"`]*--[A-Za-z0-9][\w-]*)[^'"`]*\1|(?:^|\s)(--[A-Za-z0-9][\w-]*)\b/g;
 const CONFIG_KEY_PATTERN = /^\s*["']?([A-Za-z_][\w.-]*)["']?\s*[:=]/;
 const ROUTE_PATTERN =
-  /\b(?:app|router|server)\s*\.\s*(get|post|put|patch|delete|use|all)\s*\(\s*(['"`])([^'"`]+)\2|\b(?:route|handler)\s*\(\s*(['"`])([^'"`]+)\4|\bexport\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b/i;
+  /\b(?:app|router|server|fastify)\s*\.\s*(get|post|put|patch|delete|use|all)\s*\(\s*(['"`])([^'"`]+)\2|\b(?:route|handler)\s*\(\s*(['"`])([^'"`]+)\4|\bexport\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b|@(app|router|api)\.(get|post|put|patch|delete|route)\s*\(\s*(['"`])([^'"`]+)\9|@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*(?:\(\s*(?:value\s*=\s*)?["']([^"']+)["'])?|@(HttpGet|HttpPost|HttpPut|HttpPatch|HttpDelete)\s*(?:\(\s*["']([^"']+)["'])?/i;
 const CONTROLLER_HANDLER_PATTERN = /\b(?:export\s+)?(?:async\s+)?(?:function|class|const)\s+([A-Za-z_$][\w$]*(?:Controller|Handler|Route))\b/;
+const SQL_SCHEMA_PATTERN = /\b(create|alter|drop)\s+table\b/i;
+const SQL_INDEX_PATTERN = /\b(create|drop)\s+(?:unique\s+)?index\b/i;
+const SQL_QUERY_PATTERN = /\b(select|insert\s+into|update|delete\s+from)\b/i;
 
 export function parseUnifiedDiff(diff: string): DiffSummary {
   const files: FileDiffSummary[] = [];
@@ -142,20 +165,30 @@ function applyFileHeaderLine(file: MutableFileDiff, line: string): void {
 function finalizeFileDiff(file: MutableFileDiff): FileDiffSummary {
   const addedLines = file.patchLines.filter((line) => line.kind === "added").map((line) => line.text);
   const addedExports = extractAddedExports(addedLines);
+  const addedFunctions = extractAddedFunctions(addedLines);
+  const addedClasses = extractAddedClasses(addedLines);
+  const addedInterfacesOrTypes = extractAddedInterfacesOrTypes(addedLines);
+  const addedEnums = extractAddedEnums(addedLines);
   const addedTestNames = extractTestNames(addedLines);
   const addedCliCommands = extractCliCommands(file.filePath, addedLines);
   const addedCliOptions = extractCliOptions(file.filePath, addedLines);
   const changedPackageScripts = extractChangedPackageScripts(file.filePath, file.patchLines);
   const addedConfigKeys = extractConfigKeys(file.filePath, addedLines);
-  const addedRoutes = extractRoutes(addedLines);
+  const addedRoutes = extractRoutes(file.filePath, addedLines);
+  const sqlSignals = extractSqlSignals(file.filePath, addedLines);
   const signals = buildSignals(file.filePath, {
     addedExports,
+    addedFunctions,
+    addedClasses,
+    addedInterfacesOrTypes,
+    addedEnums,
     addedTestNames,
     addedCliCommands,
     addedCliOptions,
     changedPackageScripts,
     addedConfigKeys,
-    addedRoutes
+    addedRoutes,
+    sqlSignals
   });
 
   return {
@@ -165,6 +198,10 @@ function finalizeFileDiff(file: MutableFileDiff): FileDiffSummary {
     addedLineCount: file.addedLineCount,
     deletedLineCount: file.deletedLineCount,
     addedExports,
+    addedFunctions,
+    addedClasses,
+    addedInterfacesOrTypes,
+    addedEnums,
     addedTestNames,
     addedCliCommands,
     addedCliOptions,
@@ -185,6 +222,22 @@ function extractAddedExports(lines: string[]): string[] {
       return `${match[1]} ${match[2]}`;
     })
   );
+}
+
+function extractAddedFunctions(lines: string[]): string[] {
+  return uniqueSorted(lines.flatMap((line) => collectRegexAlternatives(line, FUNCTION_PATTERN, [1, 2, 3])));
+}
+
+function extractAddedClasses(lines: string[]): string[] {
+  return uniqueSorted(lines.flatMap((line) => collectRegexAlternatives(line, CLASS_PATTERN, [1, 2])));
+}
+
+function extractAddedInterfacesOrTypes(lines: string[]): string[] {
+  return uniqueSorted(lines.flatMap((line) => collectRegexAlternatives(line, INTERFACE_OR_TYPE_PATTERN, [1, 2])));
+}
+
+function extractAddedEnums(lines: string[]): string[] {
+  return uniqueSorted(lines.flatMap((line) => collectRegexAlternatives(line, ENUM_PATTERN, [1, 2])));
 }
 
 function extractCliCommands(filePath: string, lines: string[]): string[] {
@@ -246,7 +299,11 @@ function extractConfigKeys(filePath: string, lines: string[]): string[] {
   );
 }
 
-function extractRoutes(lines: string[]): string[] {
+function extractRoutes(filePath: string, lines: string[]): string[] {
+  if (isTestFile(filePath) || isFixtureFile(filePath)) {
+    return [];
+  }
+
   return uniqueSorted(
     lines.flatMap((line) => {
       const match = ROUTE_PATTERN.exec(line);
@@ -256,8 +313,10 @@ function extractRoutes(lines: string[]): string[] {
       if (match?.[6]) {
         values.push(`${match[6].toUpperCase()} handler`);
       } else if (match) {
-        const method = match[1] || "handler";
-        const route = match[3] || match[5] || method;
+        const annotationMethod = annotationToMethod(match[11] || match[13]);
+        const pythonMethod = match[8]?.toUpperCase();
+        const method = match[1]?.toUpperCase() || pythonMethod || annotationMethod || "HANDLER";
+        const route = match[3] || match[5] || match[10] || match[12] || match[14] || method;
         values.push(`${method.toUpperCase()} ${route}`);
       }
 
@@ -270,27 +329,36 @@ function extractRoutes(lines: string[]): string[] {
   );
 }
 
-function buildSignals(
-  filePath: string,
-  values: Pick<
-    FileDiffSummary,
-    | "addedExports"
-    | "addedTestNames"
-    | "addedCliCommands"
-    | "addedCliOptions"
-    | "changedPackageScripts"
-    | "addedConfigKeys"
-    | "addedRoutes"
-  >
-): DiffSignal[] {
+function extractSqlSignals(filePath: string, lines: string[]): DiffSignal["type"][] {
+  if (!isSqlLikeFile(filePath)) {
+    return [];
+  }
+
+  return uniqueSorted(
+    lines.flatMap((line) => {
+      const signals: DiffSignal["type"][] = [];
+      if (SQL_SCHEMA_PATTERN.test(line)) signals.push("schema_changed");
+      if (SQL_INDEX_PATTERN.test(line)) signals.push("index_changed");
+      if (SQL_QUERY_PATTERN.test(line)) signals.push("query_changed");
+      return signals;
+    })
+  ) as DiffSignal["type"][];
+}
+
+function buildSignals(filePath: string, values: SignalBuildValues): DiffSignal[] {
   return [
-    ...values.addedExports.map((value) => signal("exported-symbol", value, filePath)),
-    ...values.addedTestNames.map((value) => signal("test-name", value, filePath)),
-    ...values.addedCliCommands.map((value) => signal("cli-command", value, filePath)),
-    ...values.addedCliOptions.map((value) => signal("cli-option", value, filePath)),
-    ...values.changedPackageScripts.map((value) => signal("package-script", value, filePath)),
-    ...values.addedConfigKeys.map((value) => signal("config-key", value, filePath)),
-    ...values.addedRoutes.map((value) => signal(isHandlerRouteValue(value) ? "route-handler" : "api-route", value, filePath))
+    ...values.addedExports.map((value) => signal("exported_symbol_added", value, filePath)),
+    ...values.addedFunctions.map((value) => signal("function_added", value, filePath)),
+    ...values.addedClasses.map((value) => signal(classSignalType(value), value, filePath)),
+    ...values.addedInterfacesOrTypes.map((value) => signal("interface_or_type_added", value, filePath)),
+    ...values.addedEnums.map((value) => signal("enum_added", value, filePath)),
+    ...values.addedTestNames.map((value) => signal("test_case_added", value, filePath)),
+    ...values.addedCliCommands.map((value) => signal("cli_command_changed", value, filePath)),
+    ...values.addedCliOptions.map((value) => signal("cli_command_changed", value, filePath)),
+    ...values.changedPackageScripts.map((value) => signal("package_script_changed", value, filePath)),
+    ...values.addedConfigKeys.map((value) => signal("config_changed", value, filePath)),
+    ...values.addedRoutes.map((value) => signal(isHandlerRouteValue(value) ? "controller_changed" : "api_route_changed", value, filePath)),
+    ...values.sqlSignals.map((value) => signal(value, value.replace(/_/g, " "), filePath))
   ];
 }
 
@@ -301,6 +369,24 @@ function signal(type: DiffSignal["type"], value: string, filePath: string): Diff
 function isHandlerRouteValue(value: string): boolean {
   const lower = value.toLowerCase();
   return lower.endsWith(" handler") || lower.startsWith("handler ") || lower.includes("controller");
+}
+
+function classSignalType(value: string): DiffSignal["type"] {
+  return /(controller)$/i.test(value) ? "controller_changed" : "class_added";
+}
+
+function annotationToMethod(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const lower = value.toLowerCase();
+  if (lower.includes("post")) return "POST";
+  if (lower.includes("put")) return "PUT";
+  if (lower.includes("patch")) return "PATCH";
+  if (lower.includes("delete")) return "DELETE";
+  if (lower.includes("get")) return "GET";
+  return "ROUTE";
 }
 
 function collectSwitchCommands(line: string): string[] {
@@ -324,6 +410,21 @@ function collectRegexGroup(line: string, pattern: RegExp, group: number): string
 function collectRegexAlternatives(line: string, pattern: RegExp, groups: number[]): string[] {
   pattern.lastIndex = 0;
   const values: string[] = [];
+  if (!pattern.global) {
+    const match = pattern.exec(line);
+    if (!match) {
+      return values;
+    }
+    for (const group of groups) {
+      const value = match[group];
+      if (value) {
+        values.push(value.trim());
+        break;
+      }
+    }
+    return values;
+  }
+
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(line))) {
     for (const group of groups) {
@@ -351,6 +452,18 @@ function isCliFile(filePath: string): boolean {
 
 function isConfigFile(filePath: string): boolean {
   return /(^|\/)\.env|environment|config|\.json$|\.ya?ml$|\.toml$|\.ini$/i.test(filePath);
+}
+
+function isSqlLikeFile(filePath: string): boolean {
+  return /\.(sql|prisma)$/i.test(filePath) || /(^|\/)(migrations?|db|database|schema)(\/|$)/i.test(filePath);
+}
+
+function isTestFile(filePath: string): boolean {
+  return /(\.spec\.|\.(test|tests)\.)|(^|\/)__tests__(\/|$)|(^|\/)tests?(\/|$)/i.test(filePath);
+}
+
+function isFixtureFile(filePath: string): boolean {
+  return /(^|\/)(fixtures?|testdata|test-data|__fixtures__)(\/|$)/i.test(filePath);
 }
 
 function uniqueSorted(values: string[]): string[] {

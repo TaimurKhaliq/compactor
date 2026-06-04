@@ -47,14 +47,15 @@ test("parses structured metadata from unified diffs", () => {
   const summary = parseUnifiedDiff(diff);
 
   assert.equal(summary.files.length, 5);
-  assert.ok(summary.signals.some((signal) => signal.type === "exported-symbol" && signal.value === "function runAnalyze"));
-  assert.ok(summary.signals.some((signal) => signal.type === "cli-command" && signal.value === "analyze"));
-  assert.ok(summary.signals.some((signal) => signal.type === "cli-option" && signal.value === "--repo"));
-  assert.ok(summary.signals.some((signal) => signal.type === "test-name" && signal.value === "analyze command"));
-  assert.ok(summary.signals.some((signal) => signal.type === "package-script" && signal.value === "typecheck"));
-  assert.ok(summary.signals.some((signal) => signal.type === "config-key" && signal.value === "apiBaseUrl"));
-  assert.ok(summary.signals.some((signal) => signal.type === "api-route" && signal.value === "GET /api/runs"));
-  assert.ok(summary.signals.some((signal) => signal.type === "route-handler" && signal.value === "handler RunsController"));
+  assert.ok(summary.signals.some((signal) => signal.type === "exported_symbol_added" && signal.value === "function runAnalyze"));
+  assert.ok(summary.signals.some((signal) => signal.type === "function_added" && signal.value === "runAnalyze"));
+  assert.ok(summary.signals.some((signal) => signal.type === "cli_command_changed" && signal.value === "analyze"));
+  assert.ok(summary.signals.some((signal) => signal.type === "cli_command_changed" && signal.value === "--repo"));
+  assert.ok(summary.signals.some((signal) => signal.type === "test_case_added" && signal.value === "analyze command"));
+  assert.ok(summary.signals.some((signal) => signal.type === "package_script_changed" && signal.value === "typecheck"));
+  assert.ok(summary.signals.some((signal) => signal.type === "config_changed" && signal.value === "apiBaseUrl"));
+  assert.ok(summary.signals.some((signal) => signal.type === "api_route_changed" && signal.value === "GET /api/runs"));
+  assert.ok(summary.signals.some((signal) => signal.type === "controller_changed" && signal.value === "handler RunsController"));
 });
 
 test("extracts describe, it, and test names from added lines", () => {
