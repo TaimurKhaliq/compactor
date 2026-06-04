@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 const PREFERRED_VALIDATION_SCRIPTS = ["test", "build", "typecheck", "lint", "e2e", "ui:test"];
 const PREFERRED_MAKE_TARGETS = ["test", "build", "typecheck", "lint", "e2e"];
@@ -37,6 +37,90 @@ export function discoverValidationCommands(repoRoot: string): string[] {
     ...discoverRustCommands(repoRoot),
     ...discoverSimpleCiCommands(repoRoot)
   ]);
+}
+
+export function discoverValidationCommandsForFiles(repoRoot: string, filePaths: string[]): string[] {
+  const projectRoots = rankedProjectRoots(repoRoot, filePaths);
+  if (projectRoots.length === 0) {
+    return [];
+  }
+
+  return unique(projectRoots.flatMap((projectRoot) => discoverValidationCommandsForProject(repoRoot, projectRoot)));
+}
+
+function rankedProjectRoots(repoRoot: string, filePaths: string[]): string[] {
+  const counts = new Map<string, number>();
+  for (const filePath of filePaths) {
+    const projectRoot = nearestProjectRoot(repoRoot, filePath);
+    if (!projectRoot) {
+      continue;
+    }
+    counts.set(projectRoot, (counts.get(projectRoot) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 2)
+    .map(([projectRoot]) => projectRoot);
+}
+
+function nearestProjectRoot(repoRoot: string, filePath: string): string | undefined {
+  let current = join(repoRoot, dirname(filePath));
+  while (current.startsWith(repoRoot)) {
+    if (hasProjectFile(current)) {
+      return current;
+    }
+    const next = dirname(current);
+    if (next === current) {
+      break;
+    }
+    current = next;
+  }
+  return hasProjectFile(repoRoot) ? repoRoot : undefined;
+}
+
+function hasProjectFile(projectRoot: string): boolean {
+  return [
+    "package.json",
+    "pyproject.toml",
+    "pytest.ini",
+    "tox.ini",
+    "Makefile",
+    "makefile",
+    "go.mod",
+    "Cargo.toml",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts"
+  ].some((name) => existsSync(join(projectRoot, name))) || readdirSafe(projectRoot).some((name) => name.endsWith(".sln") || name.endsWith(".csproj"));
+}
+
+function discoverValidationCommandsForProject(repoRoot: string, projectRoot: string): string[] {
+  return unique([
+    ...preferredValidationCommandsForProject(repoRoot, projectRoot, readPackageScripts(projectRoot)),
+    ...discoverMakeTargets(projectRoot),
+    ...discoverJvmCommands(projectRoot),
+    ...discoverPythonCommands(projectRoot),
+    ...discoverGoCommands(projectRoot),
+    ...discoverDotnetCommands(projectRoot),
+    ...discoverRustCommands(projectRoot)
+  ]);
+}
+
+function preferredValidationCommandsForProject(repoRoot: string, projectRoot: string, packageScripts: string[]): string[] {
+  const available = new Set(packageScripts);
+  const prefix = npmPrefix(repoRoot, projectRoot);
+  return PREFERRED_VALIDATION_SCRIPTS.filter((script) => available.has(script)).map((script) => {
+    if (script === "test") {
+      return prefix ? `npm --prefix ${prefix} test` : "npm test";
+    }
+    return prefix ? `npm --prefix ${prefix} run ${script}` : `npm run ${script}`;
+  });
+}
+
+function npmPrefix(repoRoot: string, projectRoot: string): string {
+  const rel = relative(repoRoot, projectRoot).replace(/\\/g, "/");
+  return rel === "." || rel === "" ? "" : rel;
 }
 
 function discoverMakeTargets(repoRoot: string): string[] {

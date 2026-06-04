@@ -1,4 +1,5 @@
 import { posix as path } from "node:path";
+import { discoverValidationCommandsForFiles } from "../git/packageScripts.js";
 import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, GenericSignal, MiningResult, ScanResult } from "../types.js";
 
 interface WorkingCluster {
@@ -22,6 +23,29 @@ interface DomainTermEvidence {
   rejectedNoisy: string[];
   repeated: string[];
   strength: number;
+}
+
+type PrimaryArea = CandidateSkill["primaryArea"];
+
+interface PromotionDecision {
+  outputType: CandidateSkill["outputType"];
+  promotionLevel: CandidateSkill["promotion_level"];
+  primaryArea: PrimaryArea;
+  primaryAreaShare: number;
+  workflowQuality: number;
+  generatedArtifactEvidenceShare: number;
+  reasons: string[];
+  reviewNotes: string[];
+}
+
+interface DuplicateHandlingSummary {
+  mergedDuplicateDrafts: number;
+  suppressedDuplicateDrafts: number;
+}
+
+interface TaskEvidenceSupport {
+  hasTaskSourceEvidence: boolean;
+  hasTestOrValidationSignal: boolean;
 }
 
 const MIN_CLUSTER_COMMITS = 2;
@@ -80,9 +104,25 @@ const NOISY_NAMING_TERMS = new Set([
   "improves",
   "refactor",
   "refactored",
+  "action",
+  "actions",
+  "all",
   "change",
   "changes",
   "support",
+  "compatible",
+  "compatibility",
+  "aicompatible",
+  "repo",
+  "root",
+  "workspace",
+  "workspaces",
+  "project",
+  "projects",
+  "app",
+  "apps",
+  "error",
+  "errors",
   "the",
   "and",
   "for",
@@ -97,6 +137,7 @@ const NOISY_NAMING_TERMS = new Set([
   "build",
   "built",
   "create",
+  "creates",
   "created",
   "delete",
   "deleted",
@@ -107,6 +148,9 @@ const NOISY_NAMING_TERMS = new Set([
   "saves",
   "load",
   "loaded",
+  "run",
+  "runs",
+  "running",
   "fetch",
   "fetched",
   "get",
@@ -134,6 +178,19 @@ const NOISY_NAMING_TERMS = new Set([
   "util",
   "helper",
   "helpers",
+  "fixture",
+  "fixtures",
+  "generated",
+  "snapshot",
+  "snapshots",
+  "baseline",
+  "baselines",
+  "replay",
+  "coverage",
+  "dist",
+  "expected",
+  "actual",
+  "json",
   "component",
   "components",
   "service",
@@ -159,6 +216,15 @@ const NOISY_NAMING_TERMS = new Set([
   "feature",
   "backend",
   "frontend",
+  "server",
+  "client",
+  "web",
+  "ui",
+  "lib",
+  "core",
+  "common",
+  "shared",
+  "public",
   "database",
   "docs",
   "readme",
@@ -181,18 +247,42 @@ const NOISY_NAMING_TERMS = new Set([
   "views"
 ]);
 
+const NOISY_EVIDENCE_FILE_PATTERNS = [
+  /(^|\/)(fixtures?|reports?|replay|baselines?|snapshots?|coverage|dist|build|generated)(\/|$)/i,
+  /(^|\/)package-lock\.json$/i,
+  /(^|\/)repo_learning_state\.json$/i,
+  /\.expected\.json$/i,
+  /\.report\.json$/i
+];
+
+const AGENT_READY_PATTERN_CONFIDENCE = 0.85;
+const AGENT_READY_NAMING_CONFIDENCE = 0.8;
+const AGENT_READY_PRIMARY_AREA_SHARE = 0.7;
+const AGENT_READY_MAX_ARTIFACT_SHARE = 0.25;
+const AGENT_READY_WORKFLOW_QUALITY = 0.75;
+const DRAFT_PATTERN_CONFIDENCE = 0.7;
+const DRAFT_NAMING_CONFIDENCE = 0.65;
+const DRAFT_PRIMARY_AREA_SHARE = 0.45;
+const DRAFT_MAX_ARTIFACT_SHARE = 0.4;
+const DRAFT_WORKFLOW_QUALITY = 0.5;
+const DRAFT_MIN_REPRESENTATIVE_FILES = 3;
+const DRAFT_MIN_EVIDENCE_COMMITS = 3;
+
 export function minePatterns(scan: ScanResult): MiningResult {
   const clusters = buildClusters(scan.commits);
-  const candidates = ensureUniqueCandidateIds(clusters
+  const mined = clusters
     .filter((cluster) => cluster.commits.length >= MIN_CLUSTER_COMMITS)
     .map((cluster, index) => buildCandidate(cluster, scan, index))
-    .sort((a, b) => b.patternConfidence - a.patternConfidence || b.namingConfidence - a.namingConfidence || a.name.localeCompare(b.name)));
+    .sort((a, b) => b.patternConfidence - a.patternConfidence || b.namingConfidence - a.namingConfidence || a.name.localeCompare(b.name));
+  const deduped = dedupePromotedDrafts(mined);
+  const candidates = ensureUniqueCandidateIds(deduped.candidates);
 
   return {
     repoRoot: scan.repoRoot,
     generatedAt: new Date().toISOString(),
     commitsAnalyzed: scan.commitsAnalyzed,
-    candidates
+    candidates,
+    duplicateHandling: deduped.summary
   };
 }
 
@@ -210,6 +300,133 @@ function ensureUniqueCandidateIds(candidates: CandidateSkill[]): CandidateSkill[
       id: `${candidate.id}-${count + 1}`
     };
   });
+}
+
+function dedupePromotedDrafts(candidates: CandidateSkill[]): { candidates: CandidateSkill[]; summary: DuplicateHandlingSummary } {
+  const summary: DuplicateHandlingSummary = {
+    mergedDuplicateDrafts: 0,
+    suppressedDuplicateDrafts: 0
+  };
+  const agentReady = candidates.filter((candidate) => candidate.promotion_level === "agent_ready").map(cloneCandidate);
+  const drafts = candidates.filter((candidate) => candidate.promotion_level === "draft").map(cloneCandidate);
+  const patterns = candidates.filter((candidate) => candidate.promotion_level === "pattern_candidate");
+  const keptDrafts: CandidateSkill[] = [];
+
+  for (const draft of drafts) {
+    const sameNameAgent = agentReady.find((candidate) => normalizedSkillName(candidate.name) === normalizedSkillName(draft.name));
+    if (sameNameAgent) {
+      summary.suppressedDuplicateDrafts += 1;
+      continue;
+    }
+
+    const overlappingAgent = agentReady.find((candidate) => stronglyOverlaps(candidate, draft));
+    if (overlappingAgent) {
+      mergeCandidateEvidence(overlappingAgent, draft);
+      summary.mergedDuplicateDrafts += 1;
+      continue;
+    }
+
+    const sameNameDraft = keptDrafts.find((candidate) => normalizedSkillName(candidate.name) === normalizedSkillName(draft.name));
+    if (sameNameDraft) {
+      mergeCandidateEvidence(sameNameDraft, draft);
+      summary.mergedDuplicateDrafts += 1;
+      continue;
+    }
+
+    const overlappingDraft = keptDrafts.find((candidate) => stronglyOverlaps(candidate, draft));
+    if (overlappingDraft) {
+      mergeCandidateEvidence(overlappingDraft, draft);
+      summary.mergedDuplicateDrafts += 1;
+      continue;
+    }
+
+    keptDrafts.push(draft);
+  }
+
+  return {
+    candidates: [...agentReady, ...keptDrafts, ...patterns]
+      .sort((a, b) => tierSort(a) - tierSort(b) || b.patternConfidence - a.patternConfidence || b.namingConfidence - a.namingConfidence || a.name.localeCompare(b.name)),
+    summary
+  };
+}
+
+function cloneCandidate(candidate: CandidateSkill): CandidateSkill {
+  return {
+    ...candidate,
+    evidenceCommits: candidate.evidenceCommits.map((commit) => ({ ...commit, changedFiles: [...commit.changedFiles], diffSignals: [...commit.diffSignals], pathSignals: [...commit.pathSignals] })),
+    commonFiles: [...candidate.commonFiles],
+    commonDirectories: [...candidate.commonDirectories],
+    observedConventions: [...candidate.observedConventions],
+    observedChanges: [...candidate.observedChanges],
+    suggestedValidationCommands: [...candidate.suggestedValidationCommands],
+    genericSignals: [...candidate.genericSignals],
+    repeatedTerms: [...candidate.repeatedTerms],
+    domainTerms: [...candidate.domainTerms],
+    rejectedNoisyTerms: [...candidate.rejectedNoisyTerms],
+    namingReasons: [...candidate.namingReasons],
+    frameworkHints: [...candidate.frameworkHints],
+    matchedPatterns: [...candidate.matchedPatterns],
+    pathSignals: [...candidate.pathSignals],
+    diffSignals: [...candidate.diffSignals],
+    confidenceFactors: [...candidate.confidenceFactors],
+    falsePositiveNotes: [...candidate.falsePositiveNotes],
+    promotionReasons: [...candidate.promotionReasons],
+    reviewNotes: [...candidate.reviewNotes]
+  };
+}
+
+function mergeCandidateEvidence(target: CandidateSkill, source: CandidateSkill): void {
+  target.evidenceCommits = mergeEvidenceCommits(target.evidenceCommits, source.evidenceCommits);
+  target.commonFiles = unique([...target.commonFiles, ...source.commonFiles, ...source.evidenceCommits.flatMap((commit) => commit.changedFiles)]).slice(0, 12);
+  target.commonDirectories = unique([...target.commonDirectories, ...source.commonDirectories]).slice(0, 8);
+  target.observedChanges = unique([...target.observedChanges, ...source.observedChanges]).slice(0, 12);
+  target.suggestedValidationCommands = unique([...target.suggestedValidationCommands, ...source.suggestedValidationCommands]);
+  target.repeatedTerms = unique([...target.repeatedTerms, ...source.repeatedTerms]).slice(0, 12);
+  target.domainTerms = unique([...target.domainTerms, ...source.domainTerms]).slice(0, 6);
+  target.pathSignals = unique([...target.pathSignals, ...source.pathSignals]).slice(0, 12);
+  target.diffSignals = unique([...target.diffSignals, ...source.diffSignals]).slice(0, 12);
+  target.confidenceFactors = unique([
+    ...target.confidenceFactors,
+    `Merged duplicate draft evidence from ${source.evidenceCommits.length} additional commits.`
+  ]).slice(0, 12);
+  target.falsePositiveNotes = unique([...target.falsePositiveNotes, ...source.falsePositiveNotes]).slice(0, 8);
+}
+
+function mergeEvidenceCommits(left: EvidenceCommit[], right: EvidenceCommit[]): EvidenceCommit[] {
+  const seen = new Set<string>();
+  const merged: EvidenceCommit[] = [];
+  for (const commit of [...left, ...right]) {
+    const key = commit.hash || commit.shortHash;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(commit);
+  }
+  return merged;
+}
+
+function stronglyOverlaps(left: CandidateSkill, right: CandidateSkill): boolean {
+  const fileOverlap = jaccard([...candidateFileSet(left)], [...candidateFileSet(right)]);
+  const commitOverlap = jaccard(left.evidenceCommits.map((commit) => commit.hash), right.evidenceCommits.map((commit) => commit.hash));
+  return fileOverlap >= 0.5 || commitOverlap >= 0.4;
+}
+
+function candidateFileSet(candidate: CandidateSkill): Set<string> {
+  return new Set([
+    ...candidate.commonFiles,
+    ...candidate.evidenceCommits.flatMap((commit) => commit.changedFiles)
+  ].map((file) => path.normalize(file)));
+}
+
+function normalizedSkillName(name: string): string {
+  return slug(name);
+}
+
+function tierSort(candidate: CandidateSkill): number {
+  if (candidate.promotion_level === "agent_ready") return 0;
+  if (candidate.promotion_level === "draft") return 1;
+  return 2;
 }
 
 function buildClusters(commits: CommitMetadata[]): WorkingCluster[] {
@@ -295,41 +512,73 @@ function addCommitToCluster(cluster: WorkingCluster, commit: CommitMetadata): vo
 function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number): CandidateSkill {
   const commits = cluster.commits;
   const dominant = dominantSignals(cluster, 10);
-  const termEvidence = computeDomainTermEvidence(commits);
+  const evidenceFiles = filteredEvidenceFiles(commits);
+  const termEvidence = refineDomainTermEvidence(computeDomainTermEvidence(commits, scan), commits, dominant);
   const proposal = proposeSkillName(dominant, termEvidence, frameworkHints(commits));
   const patternConfidence = calculatePatternConfidence(cluster, scan.commitsAnalyzed);
-  const commonFiles = topValues(commits.flatMap((commit) => commit.changedFiles), 8);
-  const commonDirectories = topDirectories(commits, 6);
+  const commonFiles = topValues(evidenceFiles, 8);
+  const commonDirectories = topValues(evidenceFiles.map((file) => path.dirname(file) === "." ? "repo root" : path.dirname(file)), 6);
   const pathSignals = topValues(commits.flatMap((commit) => commit.pathSignals), 12);
   const diffSignals = topDiffSignalLabels(commits, 12);
   const terms = termEvidence.repeated;
-  const id = uniqueSkillId(proposal.name, dominant, index);
+  const validationCommands = discoverValidationCommandsForFiles(scan.repoRoot, commonFiles);
+  const taskEvidenceFiles = unique(evidenceFiles);
+  const taskArea = effectiveTaskArea(commits, dominant, taskEvidenceFiles);
+  const artifactShare = generatedArtifactEvidenceShare(commits);
+  const taskName = generateTaskSkillName(taskArea, dominant, taskEvidenceFiles, proposal.domainTerms, proposal.genericCategory);
+  const namingAdjustment = adjustedNamingConfidence(proposal.namingConfidence, commits, dominant, taskEvidenceFiles, taskArea, proposal.genericCategory, validationCommands, artifactShare, taskName, proposal.domainTerms);
+  const promotion = decidePromotion(
+    commits,
+    dominant,
+    taskEvidenceFiles,
+    patternConfidence,
+    namingAdjustment.confidence,
+    proposal.genericCategory,
+    terms,
+    validationCommands,
+    taskName,
+    taskArea
+  );
+  const namingConfidence = finalNamingConfidence(namingAdjustment.confidence, promotion);
+  const candidateName = promotion.promotionLevel === "pattern_candidate"
+    ? neutralPatternCandidateName(dominant, promotion.primaryArea, promotion.primaryAreaShare, termEvidence.selected, proposal.genericCategory)
+    : taskName;
+  const id = uniqueSkillId(candidateName, dominant, index);
 
   return {
     id,
-    name: proposal.name,
+    name: candidateName,
+    taskDescription: generateTaskDescription(candidateName, promotion.primaryArea, commits, dominant, taskEvidenceFiles, proposal.domainTerms, proposal.genericCategory),
+    outputType: promotion.outputType,
+    promotion_level: promotion.promotionLevel,
+    primaryArea: promotion.primaryArea,
+    primaryAreaShare: promotion.primaryAreaShare,
+    workflowQuality: promotion.workflowQuality,
+    generatedArtifactEvidenceShare: promotion.generatedArtifactEvidenceShare,
+    promotionReasons: promotion.reasons,
+    reviewNotes: promotion.reviewNotes,
     patternConfidence,
-    namingConfidence: proposal.namingConfidence,
+    namingConfidence,
     confidence: patternConfidence,
     evidenceCommits: representativeCommits(commits, dominant).map(toEvidenceCommit),
     commonFiles,
     commonDirectories,
     observedConventions: observedConventions(dominant, commonDirectories, frameworkHints(commits)),
     observedChanges: observedChanges(commits),
-    suggestedValidationCommands: scan.validationCommands,
+    suggestedValidationCommands: validationCommands,
     genericSignals: dominant,
     repeatedTerms: terms,
     domainTerms: proposal.domainTerms,
     rejectedNoisyTerms: proposal.rejectedNoisyTerms,
     genericCategory: proposal.genericCategory,
     genericFallbackName: proposal.genericFallbackName,
-    namingReasons: proposal.reasons,
+    namingReasons: [...proposal.reasons, ...namingAdjustment.reasons],
     frameworkHints: frameworkHints(commits),
     matchedPatterns: dominant,
     pathSignals,
     diffSignals,
-    confidenceFactors: confidenceFactors(cluster, scan.commitsAnalyzed, proposal.reasons),
-    falsePositiveNotes: falsePositiveNotes(dominant, commits, proposal.namingConfidence),
+    confidenceFactors: confidenceFactors(cluster, scan.commitsAnalyzed, [...proposal.reasons, ...namingAdjustment.reasons]),
+    falsePositiveNotes: falsePositiveNotes(dominant, commits, namingConfidence),
     rationale: `Compactor grouped ${commits.length} commits with a repeated change shape: ${dominant.join(", ")}.`
   };
 }
@@ -494,12 +743,17 @@ function falsePositiveNotes(signals: GenericSignal[], commits: CommitMetadata[],
 }
 
 function toEvidenceCommit(commit: CommitMetadata): EvidenceCommit {
+  const changedFiles = nonNoisyFiles(commit.changedFiles);
+  const evidenceFiles = changedFiles.length > 0 ? changedFiles : commit.changedFiles;
   return {
     hash: commit.hash,
     shortHash: commit.shortHash,
     message: commit.message,
-    changedFiles: commit.changedFiles,
-    diffSignals: commit.diffSummary.signals.slice(0, 6).map((signal) => `${signal.type}:${signal.value} (${signal.filePath})`),
+    changedFiles: evidenceFiles,
+    diffSignals: commit.diffSummary.signals
+      .filter((signal) => !isNoisyEvidenceFile(signal.filePath))
+      .slice(0, 6)
+      .map((signal) => `${signal.type}:${signal.value} (${signal.filePath})`),
     pathSignals: commit.pathSignals.slice(0, 8),
     url: commit.commitUrl
   };
@@ -514,16 +768,20 @@ function representativeCommits(commits: CommitMetadata[], dominantSignals: Gener
   });
 }
 
-function computeDomainTermEvidence(commits: CommitMetadata[]): DomainTermEvidence {
+function computeDomainTermEvidence(commits: CommitMetadata[], scan: ScanResult): DomainTermEvidence {
   const termCommits = new Map<string, Set<string>>();
   const rejectedNoisy = new Set<string>();
+  const dynamicNoisyTerms = projectNoiseTerms(scan);
+  for (const term of topLevelProjectTerms(commits)) {
+    dynamicNoisyTerms.add(term);
+  }
 
   for (const commit of commits) {
     const terms = [
       ...commit.messageTerms,
-      ...commit.filenameTerms,
-      ...commit.touchedDirectories.flatMap(directoryTerms),
-      ...commit.diffSummary.signals.flatMap(signalValueTerms)
+      ...nonNoisyFiles(commit.changedFiles).flatMap(fileTerms),
+      ...nonNoisyFiles(commit.changedFiles).flatMap((file) => directoryTerms(path.dirname(file))),
+      ...commit.diffSummary.signals.filter((signal) => !isNoisyEvidenceFile(signal.filePath)).flatMap(signalValueTerms)
     ];
 
     for (const term of terms) {
@@ -532,7 +790,7 @@ function computeDomainTermEvidence(commits: CommitMetadata[]): DomainTermEvidenc
         continue;
       }
 
-      if (isNoisyTerm(normalized)) {
+      if (isNoisyTerm(normalized) || dynamicNoisyTerms.has(normalized)) {
         rejectedNoisy.add(normalized);
         continue;
       }
@@ -549,16 +807,886 @@ function computeDomainTermEvidence(commits: CommitMetadata[]): DomainTermEvidenc
     .filter((entry) => entry.commitCount >= Math.min(2, commits.length))
     .sort((a, b) => b.commitCount - a.commitCount || a.term.localeCompare(b.term));
 
-  const selected = ranked.slice(0, 3).map((entry) => entry.term);
+  const selected = dedupeSingularPlural(ranked.map((entry) => entry.term)).slice(0, 3);
   const maxCoverage = ranked[0]?.commitCount ?? 0;
   const strength = commits.length === 0 ? 0 : Math.min(1, maxCoverage / commits.length + selected.length * 0.08);
 
   return {
     selected,
     rejectedNoisy: [...rejectedNoisy].sort().slice(0, 12),
-    repeated: ranked.slice(0, 10).map((entry) => entry.term),
+    repeated: dedupeSingularPlural(ranked.slice(0, 10).map((entry) => entry.term)),
     strength
   };
+}
+
+function refineDomainTermEvidence(termEvidence: DomainTermEvidence, commits: CommitMetadata[], signals: GenericSignal[]): DomainTermEvidence {
+  const rejected = new Set(termEvidence.rejectedNoisy);
+  const remove = new Set<string>();
+
+  if (hasUiEvidence(commits, signals) && !apiClientFilesDominate(commits)) {
+    remove.add("api");
+  }
+
+  const filterTerms = (terms: string[]) => terms.filter((term) => {
+    if (remove.has(term)) {
+      rejected.add(term);
+      return false;
+    }
+    return true;
+  });
+
+  return {
+    ...termEvidence,
+    selected: filterTerms(termEvidence.selected),
+    repeated: filterTerms(termEvidence.repeated),
+    rejectedNoisy: [...rejected].sort().slice(0, 12)
+  };
+}
+
+function generateTaskSkillName(
+  area: PrimaryArea,
+  signals: GenericSignal[],
+  commonFiles: string[],
+  terms: string[],
+  genericCategory: string
+): string {
+  const feature = dominantFeatureNoun(terms, commonFiles, signals, area, genericCategory);
+  const hasApi = hasApiSignal(signals, genericCategory);
+
+  if (area === "frontend") {
+    if (feature === "Reporting") {
+      return prefersWorkbench(commonFiles, terms) ? "Add or Update Reporting Workbench UI" : "Update Reporting Dashboard UI";
+    }
+    return feature ? `Update ${feature} UI` : "Update UI Component";
+  }
+
+  if (area === "cli") {
+    return feature ? `Add or Update ${feature} CLI Workflow` : "Add CLI Command";
+  }
+
+  if (area === "backend") {
+    if (hasApi) {
+      return feature ? `Update ${feature} Backend API Behavior` : "Update Backend API Behavior";
+    }
+    if (signals.includes("queue_or_event_handler_changed") || signals.includes("background_job_changed")) {
+      return feature ? `Add or Update ${feature} Async Job or Event Handler` : "Add or Update Async Job or Event Handler";
+    }
+    return feature ? `Update ${feature} Backend Behavior` : "Update Backend Behavior";
+  }
+
+  if (area === "db") {
+    return feature ? `Add or Update ${feature} Database-Backed Feature` : "Add Database-Backed Feature";
+  }
+
+  if (area === "infra") {
+    if (signals.includes("ci_changed")) {
+      return feature ? `Update ${feature} Build or CI Configuration` : "Update Build or CI Configuration";
+    }
+    return feature ? `Update ${feature} Runtime Configuration` : "Update Runtime Configuration";
+  }
+
+  if (area === "docs") {
+    return feature && feature !== "Project" ? `Update ${feature} Documentation` : "Update Project Documentation";
+  }
+
+  if (area === "tests") {
+    return feature ? `Update ${feature} Tests` : "Update Tests";
+  }
+
+  if (feature) {
+    return `Update ${feature} Change Workflow`;
+  }
+
+  return "Update Engineering Workflow";
+}
+
+function generateTaskDescription(
+  taskName: string,
+  primaryAreaValue: PrimaryArea,
+  commits: CommitMetadata[],
+  signals: GenericSignal[],
+  commonFiles: string[],
+  terms: string[],
+  genericCategory: string
+): string {
+  const area = primaryAreaValue === "mixed" || primaryAreaValue === "unknown"
+    ? effectiveTaskArea(commits, signals, commonFiles)
+    : primaryAreaValue;
+  const feature = lowerFeaturePhrase(dominantFeatureNoun(terms, commonFiles, signals, area, genericCategory));
+  const hasApi = hasApiSignal(signals, genericCategory);
+
+  if (taskName === "Update Reporting Dashboard UI" || taskName === "Add or Update Reporting Workbench UI") {
+    return "Use this for reporting dashboard/workbench UI changes involving UI components, UI API wiring, and UI tests.";
+  }
+
+  if (area === "frontend") {
+    const subject = feature ? `${feature} UI` : "UI component or screen";
+    return `Use this for ${subject} changes involving components, screens, API client wiring, or related UI tests.`;
+  }
+
+  if (area === "cli") {
+    const subject = feature ? `${feature} CLI workflow` : "CLI command";
+    return `Use this for ${subject} changes involving command registration, option parsing, handlers, and tests.`;
+  }
+
+  if (area === "backend") {
+    const subject = feature ? `${feature} backend` : "backend";
+    const apiPhrase = hasApi ? " API route, controller, service, handler, and test changes" : " service, handler, middleware, and test changes";
+    return `Use this for ${subject}${apiPhrase}.`;
+  }
+
+  if (area === "db") {
+    const subject = feature ? `${feature} database-backed` : "database-backed";
+    return `Use this for ${subject} changes involving migrations, schema/model updates, queries, repositories, and tests.`;
+  }
+
+  if (area === "infra") {
+    const subject = feature ? `${feature} runtime or build configuration` : "runtime, build, CI, or infrastructure configuration";
+    return `Use this for ${subject} changes with matching validation commands from the owning project.`;
+  }
+
+  if (area === "docs" || primaryAreaValue === "docs") {
+    const subject = feature ? `${feature} documentation` : "project documentation";
+    return `Use this for ${subject} updates involving README, docs, changelog, or design-note files.`;
+  }
+
+  if (area === "tests") {
+    const subject = feature ? `${feature} tests` : "test coverage";
+    return `Use this for ${subject} changes involving focused test cases, fixtures, and nearby source examples.`;
+  }
+
+  return "Use this for repeated repository changes where the examples and evidence show a concrete source/test workflow.";
+}
+
+function effectiveTaskArea(commits: CommitMetadata[], signals: GenericSignal[], commonFiles: string[]): PrimaryArea {
+  if (hasUiEvidence(commits, signals, commonFiles)) return "frontend";
+  if (signals.includes("cli_command_changed")) return "cli";
+  if (signals.includes("api_route_changed") || signals.includes("controller_changed") || signals.includes("service_layer_changed")) return "backend";
+  if (signals.includes("migration_changed") || signals.includes("schema_changed") || signals.includes("model_or_entity_changed") || signals.includes("query_changed")) return "db";
+  if (signals.includes("ci_changed") || signals.includes("config_changed") || signals.includes("docker_changed") || signals.includes("terraform_or_infra_changed")) return "infra";
+  if (signals.includes("docs_changed") || signals.includes("readme_changed") || signals.includes("adr_or_design_doc_changed")) return "docs";
+  if (signals.some(isTestSignal)) return "tests";
+  return primaryArea(commits).area;
+}
+
+function dominantFeatureNoun(terms: string[], commonFiles: string[], signals: GenericSignal[], area: PrimaryArea, genericCategory: string): string {
+  const lowered = new Set(terms.map((term) => term.toLowerCase()));
+  const fileText = commonFiles.join(" ").toLowerCase();
+  const taskFileText = commonFiles.filter((file) => isTaskSourceFile(area, genericCategory, file)).join(" ").toLowerCase();
+  const hasTerm = (...values: string[]) => values.some((value) => lowered.has(value) || taskFileText.includes(value) || (area !== "cli" && fileText.includes(value)));
+
+  if (area === "cli") {
+    if (taskFileText.includes("repair")) return "Repair";
+    if (taskFileText.includes("audit")) return "Audit";
+    if (taskFileText.includes("report")) return "Reporting";
+    return "";
+  }
+
+  if (hasTerm("report", "reporting", "reports")) {
+    if (area === "frontend") return "Reporting";
+    if (hasTerm("audit")) return "Audit Reporting";
+    return "Reporting";
+  }
+  if (hasTerm("evidence") && hasTerm("heuristic", "heuristics")) return "Evidence Heuristics";
+  if (hasTerm("heuristic", "heuristics")) return hasTerm("runtime") ? "Runtime Heuristics" : "Heuristics";
+  if (hasTerm("repair")) return "Repair";
+  if (hasTerm("crawl") && hasTerm("graph")) return "Crawl Graph";
+  if (hasTerm("grid", "table", "columns")) return "Grid";
+  if (area === "docs" && (hasTerm("readme") || signals.includes("readme_changed"))) return "Project";
+
+  const selected = terms
+    .filter((term) => !isFeatureNoiseTerm(term))
+    .slice(0, 2);
+
+  return selected.map(domainTermToTitle).join(" ");
+}
+
+function lowerFeaturePhrase(feature: string): string {
+  return feature
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => ["UI", "API", "CLI", "CI"].includes(word) ? word : word.toLowerCase())
+    .join(" ");
+}
+
+function isFeatureNoiseTerm(term: string): boolean {
+  const normalized = normalizeTerm(term);
+  if (!normalized) return true;
+  return NOISY_NAMING_TERMS.has(normalized) || normalized === "api" || normalized === "error" || normalized === "errors";
+}
+
+function hasObviousJunkName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return /\b(aicompatible|compatible|all|run|runs|running|action|actions)\b/.test(normalized) || /\bpattern\b/i.test(name);
+}
+
+function hasUiEvidence(commits: CommitMetadata[], signals: GenericSignal[], files: string[] = commits.flatMap((commit) => commit.changedFiles)): boolean {
+  if (signals.some((signal) => ["ui_changed", "component_changed", "page_or_screen_changed", "style_changed", "frontend_test_changed"].includes(signal))) {
+    return true;
+  }
+  return files.some((file) => /(^|\/)(ui|frontend|client|web)\/src\/(components?|pages?|screens?|views?|routes?|api)|(^|\/)src\/(components?|pages?|screens?|views?)(\/|$)/i.test(file));
+}
+
+function apiClientFilesDominate(commits: CommitMetadata[]): boolean {
+  const usefulFiles = nonNoisyFiles(commits.flatMap((commit) => commit.changedFiles));
+  const apiClientFiles = usefulFiles.filter((file) => /(^|\/)(ui|frontend|client|web)\/src\/api(?:\.|\/)|(^|\/)api(?:Client|\.client)?\.(tsx?|jsx?)$/i.test(file));
+  const uiSourceFiles = usefulFiles.filter((file) => /(^|\/)(ui|frontend|client|web)\/src\/|(^|\/)src\/(components?|pages?|screens?|views?)(\/|$)/i.test(file));
+  return apiClientFiles.length > 0 && apiClientFiles.length > Math.max(1, uiSourceFiles.length - apiClientFiles.length);
+}
+
+function prefersWorkbench(commonFiles: string[], terms: string[]): boolean {
+  return [...commonFiles, ...terms].some((value) => /workbench/i.test(value));
+}
+
+function adjustedNamingConfidence(
+  rawConfidence: number,
+  commits: CommitMetadata[],
+  signals: GenericSignal[],
+  evidenceFiles: string[],
+  taskArea: PrimaryArea,
+  genericCategory: string,
+  validationCommands: string[],
+  artifactShare: number,
+  taskName: string,
+  domainTerms: string[]
+): { confidence: number; reasons: string[] } {
+  let confidence = rawConfidence;
+  const reasons: string[] = [];
+  const strongAlignment = hasStrongSourceTestAlignment(taskArea, genericCategory, evidenceFiles, signals, validationCommands);
+
+  if (commits.length <= 3 && !strongAlignment) {
+    const capped = Math.min(confidence, 0.75);
+    if (capped < confidence) {
+      reasons.push("naming confidence capped at 75% because the cluster has three or fewer evidence commits without strong source/test alignment");
+      confidence = capped;
+    }
+  }
+
+  if (artifactShare > AGENT_READY_MAX_ARTIFACT_SHARE) {
+    const capped = Math.min(confidence, 0.7);
+    if (capped < confidence) {
+      reasons.push("naming confidence capped at 70% because generated artifacts are a large share of the evidence");
+      confidence = capped;
+    }
+  }
+
+  if (domainTerms.length > 0 && !taskNameUsesDomainTerms(taskName, domainTerms)) {
+    const capped = Math.min(confidence, 0.72);
+    if (capped < confidence) {
+      reasons.push("naming confidence capped at 72% because repeated domain terms did not support the final task name");
+      confidence = capped;
+    }
+  }
+
+  return {
+    confidence: Number(confidence.toFixed(2)),
+    reasons
+  };
+}
+
+function taskNameUsesDomainTerms(taskName: string, domainTerms: string[]): boolean {
+  const normalizedName = taskName.toLowerCase();
+  return domainTerms.some((term) => normalizedName.includes(term.toLowerCase()) || (term === "report" && /reporting/.test(normalizedName)));
+}
+
+function finalNamingConfidence(confidence: number, promotion: PromotionDecision): number {
+  if (promotion.promotionLevel !== "pattern_candidate") {
+    return confidence;
+  }
+
+  const demotedForNoise = promotion.reasons.some((reason) =>
+    /(generated artifact|workflow quality|primary area|source file matching|test or validation|noisy|over-broad)/i.test(reason)
+  );
+  return Number((demotedForNoise ? Math.min(confidence, 0.7) : confidence).toFixed(2));
+}
+
+function hasStrongSourceTestAlignment(
+  taskArea: PrimaryArea,
+  genericCategory: string,
+  evidenceFiles: string[],
+  signals: GenericSignal[],
+  validationCommands: string[]
+): boolean {
+  const support = taskEvidenceSupport(taskArea, genericCategory, evidenceFiles, signals, validationCommands);
+  const sourceCount = evidenceFiles.filter((file) => isTaskSourceFile(taskArea, genericCategory, file)).length;
+  return support.hasTaskSourceEvidence && support.hasTestOrValidationSignal && sourceCount >= 2;
+}
+
+function taskEvidenceSupport(
+  taskArea: PrimaryArea,
+  genericCategory: string,
+  evidenceFiles: string[],
+  signals: GenericSignal[],
+  validationCommands: string[]
+): TaskEvidenceSupport {
+  return {
+    hasTaskSourceEvidence: evidenceFiles.some((file) => isTaskSourceFile(taskArea, genericCategory, file)),
+    hasTestOrValidationSignal: evidenceFiles.some(isTestFile) || signals.some(isTestSignal) || validationCommands.length > 0
+  };
+}
+
+function isTaskSourceFile(taskArea: PrimaryArea, genericCategory: string, filePath: string): boolean {
+  if (isNoisyEvidenceFile(filePath) || isTestFile(filePath)) {
+    return false;
+  }
+
+  switch (taskArea) {
+    case "frontend":
+      return isUiSourceFile(filePath);
+    case "cli":
+      return isCliSourceFile(filePath);
+    case "backend":
+      return /Backend API/.test(genericCategory) ? isBackendApiSourceFile(filePath) : isBackendSourceFile(filePath);
+    case "db":
+      return isDatabaseSourceFile(filePath);
+    case "infra":
+      return isInfraSourceFile(filePath);
+    case "docs":
+      return isDocsSourceFile(filePath);
+    case "tests":
+      return isTestFile(filePath);
+    default:
+      return isSourceFile(filePath);
+  }
+}
+
+function isUiSourceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return !isTestFile(lower) && (
+    /(^|\/)(ui|frontend|client|web)\/src\/(components?|pages?|screens?|views?|routes?|api)(\/|\.|$)/i.test(lower) ||
+    /(^|\/)src\/(components?|pages?|screens?|views?)(\/|$)/i.test(lower)
+  );
+}
+
+function isCliSourceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return !isTestFile(lower) && (
+    /(^|\/)(src\/)?cli(\/|\.|$)/i.test(lower) ||
+    /(^|\/)(commands?|cmd)(\/|$)/i.test(lower)
+  ) && /\.(tsx?|jsx?|py|go|rs|cs|java|kt)$/i.test(lower);
+}
+
+function isBackendApiSourceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return !isTestFile(lower) && (
+    /(^|\/)(routes?|controllers?|handlers?|api|server)(\/|$)/i.test(lower) ||
+    /(^|\/)(server|app)\.(tsx?|jsx?|py|go|rs|cs|java|kt)$/i.test(lower)
+  ) && /\.(tsx?|jsx?|py|go|rs|cs|java|kt)$/i.test(lower);
+}
+
+function isBackendSourceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return !isTestFile(lower) && (
+    isBackendApiSourceFile(lower) ||
+    /(^|\/)(services?|repositories?|dao|middleware|workers?|jobs?|events?|consumers?|subscribers?)(\/|$)/i.test(lower)
+  ) && /\.(tsx?|jsx?|py|go|rs|cs|java|kt)$/i.test(lower);
+}
+
+function isDatabaseSourceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return !isTestFile(lower) && (
+    /(^|\/)(migrations?|db|database|models?|entities?|repositories?)(\/|$)/i.test(lower) ||
+    /\.(sql|prisma)$/i.test(lower)
+  );
+}
+
+function isInfraSourceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return /(^|\/)(package\.json|makefile|dockerfile|docker-compose\.ya?ml|\.github\/workflows\/|\.gitlab-ci\.ya?ml|jenkinsfile|pom\.xml|build\.gradle(?:\.kts)?|pyproject\.toml|go\.mod|cargo\.toml)$/i.test(lower) ||
+    /\.(ya?ml|toml|ini|json|tf)$/i.test(lower);
+}
+
+function isDocsSourceFile(filePath: string): boolean {
+  return /\.(md|mdx|rst|adoc)$/i.test(filePath);
+}
+
+function decidePromotion(
+  commits: CommitMetadata[],
+  dominantSignals: GenericSignal[],
+  evidenceFiles: string[],
+  patternConfidence: number,
+  namingConfidence: number,
+  genericCategory: string,
+  terms: string[],
+  validationCommands: string[],
+  proposedTaskName: string,
+  taskArea: PrimaryArea
+): PromotionDecision {
+  const primary = primaryArea(commits);
+  const workflowQuality = calculateWorkflowQuality(commits, dominantSignals, evidenceFiles, validationCommands);
+  const artifactShare = generatedArtifactEvidenceShare(commits);
+  const representativeFileCount = representativeSourceTestFiles(evidenceFiles).length;
+  const taskSupport = taskEvidenceSupport(taskArea, genericCategory, evidenceFiles, dominantSignals, validationCommands);
+  const hasWorkflow = workflowQuality >= DRAFT_WORKFLOW_QUALITY
+    && actionableWorkflowKind(genericCategory, taskArea, terms) !== "unknown"
+    && taskSupport.hasTaskSourceEvidence;
+  const hasJunkName = hasObviousJunkName(proposedTaskName);
+  const agentReadyFailures = thresholdFailures({
+    commitCount: commits.length,
+    patternConfidence,
+    namingConfidence,
+    primaryShare: primary.share,
+    artifactShare,
+    workflowQuality,
+    representativeFileCount,
+    hasWorkflow,
+    hasJunkName,
+    hasTaskSourceEvidence: taskSupport.hasTaskSourceEvidence,
+    hasTestOrValidationSignal: taskSupport.hasTestOrValidationSignal,
+    thresholds: {
+      patternConfidence: AGENT_READY_PATTERN_CONFIDENCE,
+      namingConfidence: AGENT_READY_NAMING_CONFIDENCE,
+      primaryShare: AGENT_READY_PRIMARY_AREA_SHARE,
+      artifactShare: AGENT_READY_MAX_ARTIFACT_SHARE,
+      workflowQuality: AGENT_READY_WORKFLOW_QUALITY,
+      representativeFileCount: 1,
+      commitCount: MIN_CLUSTER_COMMITS,
+      allowJunkName: false,
+      requireTaskEvidence: true,
+      requireTestOrValidation: true
+    }
+  });
+
+  if (primary.area !== "mixed" && primary.area !== "unknown" && agentReadyFailures.length === 0) {
+    const reviewNotes = ["Promoted as agent-ready because the cluster is coherent, high-confidence, and has enough workflow evidence."];
+    return {
+      outputType: "skill",
+      promotionLevel: "agent_ready",
+      primaryArea: taskArea === "unknown" || taskArea === "mixed" ? primary.area : taskArea,
+      primaryAreaShare: primary.share,
+      workflowQuality,
+      generatedArtifactEvidenceShare: artifactShare,
+      reasons: ["Promoted to agent-ready skill."],
+      reviewNotes
+    };
+  }
+
+  const draftFailures = thresholdFailures({
+    commitCount: commits.length,
+    patternConfidence,
+    namingConfidence,
+    primaryShare: primary.share,
+    artifactShare,
+    workflowQuality,
+    representativeFileCount,
+    hasWorkflow,
+    hasJunkName,
+    hasTaskSourceEvidence: taskSupport.hasTaskSourceEvidence,
+    hasTestOrValidationSignal: taskSupport.hasTestOrValidationSignal,
+    thresholds: {
+      patternConfidence: DRAFT_PATTERN_CONFIDENCE,
+      namingConfidence: DRAFT_NAMING_CONFIDENCE,
+      primaryShare: DRAFT_PRIMARY_AREA_SHARE,
+      artifactShare: DRAFT_MAX_ARTIFACT_SHARE,
+      workflowQuality: DRAFT_WORKFLOW_QUALITY,
+      representativeFileCount: DRAFT_MIN_REPRESENTATIVE_FILES,
+      commitCount: DRAFT_MIN_EVIDENCE_COMMITS,
+      allowJunkName: false,
+      requireTaskEvidence: true,
+      requireTestOrValidation: true
+    }
+  });
+
+  if (draftFailures.length === 0) {
+    return {
+      outputType: "skill",
+      promotionLevel: "draft",
+      primaryArea: taskArea === "unknown" || taskArea === "mixed" ? primary.area : taskArea,
+      primaryAreaShare: primary.share,
+      workflowQuality,
+      generatedArtifactEvidenceShare: artifactShare,
+      reasons: agentReadyFailures.length > 0 ? agentReadyFailures : ["Needs human review before becoming trusted guidance."],
+      reviewNotes: ["Generated as a draft skill because the cluster is useful but not clean enough to trust automatically."]
+    };
+  }
+
+  return {
+    outputType: "pattern",
+    promotionLevel: "pattern_candidate",
+    primaryArea: primary.area,
+    primaryAreaShare: primary.share,
+    workflowQuality,
+    generatedArtifactEvidenceShare: artifactShare,
+    reasons: draftFailures,
+    reviewNotes: ["Not promoted to a skill. Review this pattern manually before turning it into agent guidance."]
+  };
+}
+
+function thresholdFailures(input: {
+  commitCount: number;
+  patternConfidence: number;
+  namingConfidence: number;
+  primaryShare: number;
+  artifactShare: number;
+  workflowQuality: number;
+  representativeFileCount: number;
+  hasWorkflow: boolean;
+  hasJunkName: boolean;
+  hasTaskSourceEvidence: boolean;
+  hasTestOrValidationSignal: boolean;
+  thresholds: {
+    patternConfidence: number;
+    namingConfidence: number;
+    primaryShare: number;
+    artifactShare: number;
+    workflowQuality: number;
+    representativeFileCount: number;
+    commitCount: number;
+    allowJunkName: boolean;
+    requireTaskEvidence: boolean;
+    requireTestOrValidation: boolean;
+  };
+}): string[] {
+  const failures: string[] = [];
+  if (input.commitCount < input.thresholds.commitCount) failures.push(`Only ${input.commitCount} evidence commits were found.`);
+  if (input.patternConfidence < input.thresholds.patternConfidence) failures.push(`Pattern confidence ${Math.round(input.patternConfidence * 100)}% is below threshold.`);
+  if (input.namingConfidence < input.thresholds.namingConfidence) failures.push(`Naming confidence ${Math.round(input.namingConfidence * 100)}% is below threshold.`);
+  if (input.primaryShare < input.thresholds.primaryShare) failures.push(`Only ${Math.round(input.primaryShare * 100)}% of evidence commits share the primary area.`);
+  if (input.artifactShare > input.thresholds.artifactShare) failures.push(`Generated artifact evidence share ${Math.round(input.artifactShare * 100)}% is above threshold.`);
+  if (input.workflowQuality < input.thresholds.workflowQuality || !input.hasWorkflow) failures.push(`Workflow quality ${Math.round(input.workflowQuality * 100)}% is below threshold.`);
+  if (input.representativeFileCount < input.thresholds.representativeFileCount) failures.push(`Only ${input.representativeFileCount} representative source/test files were found.`);
+  if (!input.thresholds.allowJunkName && input.hasJunkName) failures.push("The proposed name contains noisy or over-broad terms.");
+  if (input.thresholds.requireTaskEvidence && !input.hasTaskSourceEvidence) failures.push("No source file matching the proposed task type was found.");
+  if (input.thresholds.requireTestOrValidation && !input.hasTestOrValidationSignal) failures.push("No matching test or validation signal was found.");
+  return failures;
+}
+
+function calculateWorkflowQuality(
+  commits: CommitMetadata[],
+  dominantSignals: GenericSignal[],
+  commonFiles: string[],
+  validationCommands: string[]
+): number {
+  let score = 0;
+  if (commonFiles.some(isSourceFile)) score += 0.25;
+  if (commonFiles.some(isTestFile)) score += 0.25;
+  if (validationCommands.length > 0) score += 0.2;
+  if (hasDominantGenericCategory(commits, dominantSignals)) score += 0.15;
+  if (commonFiles.length > 0) score += 0.15;
+  return Number(score.toFixed(2));
+}
+
+function hasDominantGenericCategory(commits: CommitMetadata[], dominantSignals: GenericSignal[]): boolean {
+  const primary = primaryArea(commits);
+  return primary.share >= 0.7 || broadAreas(dominantSignals).length <= 2;
+}
+
+function generatedArtifactEvidenceShare(commits: CommitMetadata[]): number {
+  const files = commits.flatMap((commit) => commit.changedFiles);
+  if (files.length === 0) {
+    return 0;
+  }
+  return files.filter(isNoisyEvidenceFile).length / files.length;
+}
+
+function representativeSourceTestFiles(files: string[]): string[] {
+  return files.filter((file) => isSourceFile(file) || isTestFile(file));
+}
+
+function isSourceFile(filePath: string): boolean {
+  return /\.(tsx?|jsx?|py|java|kt|cs|go|rs|sql|prisma)$/i.test(filePath) && !isTestFile(filePath);
+}
+
+function isTestFile(filePath: string): boolean {
+  return /(\.spec\.|\.(test|tests)\.)|(^|\/)(__tests__|tests?|e2e|playwright|cypress)(\/|$)/i.test(filePath);
+}
+
+function neutralPatternCandidateName(
+  signals: GenericSignal[],
+  primaryAreaValue: PrimaryArea,
+  primaryAreaShare: number,
+  terms: string[],
+  genericCategory: string
+): string {
+  const areas = patternAreaLabels(signals, genericCategory);
+  const isMixed = primaryAreaValue === "mixed" || primaryAreaValue === "unknown" || primaryAreaShare < 0.6 || areas.length > 2;
+  const domain = patternDomainHint(terms);
+
+  if (isMixed) {
+    const areaLabel = areas.slice(0, 2).join("/") || "Change";
+    return trimPatternName(`Mixed ${areaLabel}${domain ? ` ${domain}` : ""} Changes`);
+  }
+
+  if (primaryAreaValue === "docs") return "Documentation Updates";
+  if (primaryAreaValue === "cli") return trimPatternName(`CLI${signals.some(isTestSignal) ? "/Test" : ""} Change Cluster`);
+  if (primaryAreaValue === "backend") return hasApiSignal(signals, genericCategory) ? "Backend/API Change Cluster" : "Backend Change Cluster";
+  if (primaryAreaValue === "db") return "Database Change Cluster";
+  if (primaryAreaValue === "infra") return signals.includes("fixture_changed") ? "Config/Fixture Change Cluster" : "Config Change Cluster";
+  if (primaryAreaValue === "frontend") return trimPatternName(`UI${signals.some(isTestSignal) ? "/Test" : ""}${domain ? ` ${domain}` : ""} Changes`);
+  if (primaryAreaValue === "tests") return "Test Change Cluster";
+
+  return "Mixed Change Cluster";
+}
+
+function patternAreaLabels(signals: GenericSignal[], genericCategory: string): string[] {
+  const labels = new Set<string>();
+  for (const signal of signals) {
+    if (/^(ui|component|page_or_screen|route_view|style|frontend)/.test(signal)) labels.add("UI");
+    if (/^(backend|api_route|controller|service_layer|repository_or_dao|middleware|auth|validation|serialization|background_job|queue_or_event_handler)/.test(signal)) {
+      labels.add(hasApiSignal(signals, genericCategory) ? "Backend/API" : "Backend");
+    }
+    if (/^(db|migration|schema|model_or_entity|seed_data|query|index)/.test(signal)) labels.add("Database");
+    if (/^(config|env|package_or_dependency|package_script|ci|docker|terraform_or_infra|deployment)/.test(signal)) labels.add("Config");
+    if (isTestSignal(signal)) labels.add("Test");
+    if (/^(docs|readme|adr_or_design_doc|changelog)/.test(signal)) labels.add("Docs");
+    if (/^cli_command/.test(signal)) labels.add("CLI");
+  }
+  return [...labels].sort((a, b) => patternAreaPriority(a) - patternAreaPriority(b));
+}
+
+function patternAreaPriority(area: string): number {
+  const index = ["UI", "Backend/API", "Backend", "CLI", "Test", "Database", "Config", "Docs"].indexOf(area);
+  return index === -1 ? 99 : index;
+}
+
+function patternDomainHint(terms: string[]): string {
+  const lower = new Set(terms.map((term) => term.toLowerCase()));
+  if (lower.has("report") || lower.has("reporting")) return "Reporting";
+  if (lower.has("audit")) return "Audit";
+  return "";
+}
+
+function hasApiSignal(signals: GenericSignal[], genericCategory: string): boolean {
+  return signals.includes("api_route_changed") || /API/.test(genericCategory);
+}
+
+function isTestSignal(signal: GenericSignal): boolean {
+  return /(test|fixture)/.test(signal);
+}
+
+function trimPatternName(name: string): string {
+  return name
+    .replace(/\b(Add|Update|Feature|Skill)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 6)
+    .join(" ");
+}
+
+function filteredEvidenceFiles(commits: CommitMetadata[]): string[] {
+  return commits.flatMap((commit) => nonNoisyFiles(commit.changedFiles));
+}
+
+function nonNoisyFiles(files: string[]): string[] {
+  return files.filter((file) => !isNoisyEvidenceFile(file));
+}
+
+function isNoisyEvidenceFile(filePath: string): boolean {
+  const normalized = path.normalize(filePath).replace(/^\.\/+/, "");
+  return NOISY_EVIDENCE_FILE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function projectNoiseTerms(scan: ScanResult): Set<string> {
+  const values = [
+    scan.repoRoot,
+    scan.repositoryInput,
+    scan.workspacePath,
+    scan.remoteUrl
+  ].filter((value): value is string => Boolean(value));
+  const terms = new Set<string>(["app", "apps", "src", "test", "tests", "repo", "root", "workspace", "workspaces"]);
+
+  for (const value of values) {
+    const cleaned = value.replace(/\.git$/i, "");
+    const basename = path.basename(cleaned);
+    for (const term of tokenizeTerm(basename)) {
+      terms.add(term);
+    }
+
+    const repoSlug = /github\.com[:/][^/]+\/([^/\s]+?)(?:\.git)?$/i.exec(cleaned)?.[1];
+    if (repoSlug) {
+      for (const term of tokenizeTerm(repoSlug)) {
+        terms.add(term);
+      }
+    }
+  }
+
+  return terms;
+}
+
+function topLevelProjectTerms(commits: CommitMetadata[]): string[] {
+  const termCommitCounts = new Map<string, Set<string>>();
+
+  for (const commit of commits) {
+    const topLevelDirs = unique(commit.changedFiles
+      .map((file) => path.normalize(file).split("/")[0])
+      .filter((part): part is string => typeof part === "string" && part.length > 0 && !part.includes(".")));
+
+    for (const topLevelDir of topLevelDirs) {
+      for (const term of tokenizeTerm(topLevelDir)) {
+        if (!termCommitCounts.has(term)) {
+          termCommitCounts.set(term, new Set());
+        }
+        termCommitCounts.get(term)?.add(commit.hash);
+      }
+    }
+  }
+
+  const minCommits = Math.max(2, Math.ceil(commits.length * 0.6));
+  return [...termCommitCounts.entries()]
+    .filter(([, commitSet]) => commitSet.size >= minCommits)
+    .map(([term]) => term);
+}
+
+function fileTerms(filePath: string): string[] {
+  const base = path.basename(filePath)
+    .replace(/\.(spec|test|expected|report)$/i, "")
+    .replace(/\.[^.]+$/i, "");
+  return tokenizeTerm(base);
+}
+
+function dedupeSingularPlural(terms: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+
+  for (const term of terms) {
+    const singular = singularize(term);
+    if (seen.has(term) || seen.has(singular)) {
+      continue;
+    }
+    output.push(term);
+    seen.add(term);
+    seen.add(singular);
+  }
+
+  return output;
+}
+
+function singularize(term: string): string {
+  if (term.endsWith("ies") && term.length > 4) {
+    return `${term.slice(0, -3)}y`;
+  }
+  if (term.endsWith("s") && !term.endsWith("ss") && term.length > 3) {
+    return term.slice(0, -1);
+  }
+  return term;
+}
+
+function primaryArea(commits: CommitMetadata[]): { area: PrimaryArea; share: number } {
+  const counts = new Map<PrimaryArea, number>();
+
+  for (const commit of commits) {
+    const area = commitPrimaryArea(commit);
+    if (area === "unknown") {
+      continue;
+    }
+    counts.set(area, (counts.get(area) ?? 0) + 1);
+  }
+
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1] || areaSort(a[0]) - areaSort(b[0]))[0];
+  if (!top || commits.length === 0) {
+    return { area: "unknown", share: 0 };
+  }
+
+  const [area, count] = top;
+  return {
+    area,
+    share: Number((count / commits.length).toFixed(2))
+  };
+}
+
+function commitPrimaryArea(commit: CommitMetadata): PrimaryArea {
+  const scores = new Map<PrimaryArea, number>();
+
+  for (const signal of commit.genericSignals) {
+    const area = areaForSignal(signal);
+    if (area === "unknown") {
+      continue;
+    }
+    scores.set(area, (scores.get(area) ?? 0) + signalAreaWeight(signal, area));
+  }
+
+  const likely = likelyAreaToPrimary(commit.likelyArea);
+  if (likely !== "unknown" && likely !== "mixed") {
+    scores.set(likely, (scores.get(likely) ?? 0) + 0.35);
+  }
+
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1] || areaSort(a[0]) - areaSort(b[0]));
+  const top = ranked[0];
+  if (!top) {
+    return "unknown";
+  }
+
+  const tied = ranked.filter((entry) => entry[1] === top[1]);
+  if (tied.length > 1 && top[1] < 2) {
+    return "mixed";
+  }
+
+  return top[0];
+}
+
+function broadAreas(signals: GenericSignal[]): PrimaryArea[] {
+  return unique(signals.map(areaForSignal).filter((area) => area !== "unknown" && area !== "mixed"));
+}
+
+function areaForSignal(signal: GenericSignal): PrimaryArea {
+  if (signal === "cli_command_changed") return "cli";
+  if (/^(ui|component|page_or_screen|route_view|style|frontend)/.test(signal)) return "frontend";
+  if (/^(backend|api_route|controller|service_layer|repository_or_dao|middleware|auth|validation|serialization|background_job|queue_or_event_handler)/.test(signal)) return "backend";
+  if (/^(db|migration|schema|model_or_entity|seed_data|query|index)/.test(signal)) return "db";
+  if (/^(config|env|package_or_dependency|package_script|ci|docker|terraform_or_infra|deployment)/.test(signal)) return "infra";
+  if (/(test|fixture)/.test(signal)) return "tests";
+  if (/^(docs|readme|adr_or_design_doc|changelog)/.test(signal)) return "docs";
+  return "unknown";
+}
+
+function signalAreaWeight(signal: GenericSignal, area: PrimaryArea): number {
+  if (area === "tests" || area === "docs") return 1;
+  if (signal === "cli_command_changed") return 2.5;
+  if (signal === "package_or_dependency_changed" || signal === "package_script_changed") return 1.5;
+  return 2;
+}
+
+function likelyAreaToPrimary(area: CommitMetadata["likelyArea"]): PrimaryArea {
+  if (area === "config") return "infra";
+  if (area === "frontend" || area === "backend" || area === "tests" || area === "docs" || area === "mixed" || area === "unknown") {
+    return area;
+  }
+  return "unknown";
+}
+
+function sourceEvidenceRatio(commits: CommitMetadata[]): number {
+  const allFiles = commits.flatMap((commit) => commit.changedFiles);
+  if (allFiles.length === 0) {
+    return 0;
+  }
+
+  const usefulFiles = allFiles.filter((file) => !isNoisyEvidenceFile(file) && isUsefulEvidenceFile(file));
+  return usefulFiles.length / allFiles.length;
+}
+
+function isUsefulEvidenceFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  if (isNoisyEvidenceFile(lower)) {
+    return false;
+  }
+
+  return (
+    /\.(tsx?|jsx?|py|java|kt|cs|go|rs|sql|prisma|md|mdx|rst|html|css|scss|sass|less|ya?ml|toml|ini|json)$/i.test(lower) ||
+    /(^|\/)(src|app|lib|server|client|ui|frontend|backend|tests?|e2e|docs?|migrations?|db|database|config|configs|infra|deploy|scripts)(\/|$)/i.test(lower) ||
+    /(^|\/)(dockerfile|makefile|package\.json|pom\.xml|build\.gradle(?:\.kts)?|cargo\.toml|go\.mod|pyproject\.toml)$/i.test(lower)
+  );
+}
+
+function actionableWorkflowKind(genericCategory: string, area: PrimaryArea, terms: string[]): string {
+  if (area === "mixed" || area === "unknown") {
+    return "unknown";
+  }
+
+  if (/Backend API|Backend Pattern/.test(genericCategory)) return "backend";
+  if (/Database/.test(genericCategory)) return "db";
+  if (/UI|Frontend/.test(genericCategory)) return "frontend";
+  if (/CLI/.test(genericCategory)) return "cli";
+  if (/Configuration|Infrastructure|Build|CI/.test(genericCategory)) return "infra";
+  if (/Documentation/.test(genericCategory)) return "docs";
+  if (terms.length > 0 && ["frontend", "backend", "db", "infra", "tests", "docs", "cli"].includes(area)) {
+    return area;
+  }
+  return "unknown";
+}
+
+function areaSort(area: PrimaryArea): number {
+  return ["cli", "backend", "db", "frontend", "infra", "tests", "docs", "mixed", "unknown"].indexOf(area);
 }
 
 function buildDomainPhrase(terms: string[]): string {

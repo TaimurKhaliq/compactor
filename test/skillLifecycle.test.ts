@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -139,8 +139,46 @@ test("approve and deprecate update metadata and AGENTS excludes deprecated skill
     assert.equal(deprecated.status, "deprecated");
 
     const agents = renderAgentsMarkdownFromMetadata(base, readSkillMetadata(repoRoot));
-    assert.match(agents, /No fresh or human-approved generated skills/);
+    assert.match(agents, /No agent-ready skills were generated/);
     assert.doesNotMatch(agents, /use \.compactor\/skills\/build-project-grid/);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("approve promotes a draft skill into trusted skills", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-lifecycle-"));
+
+  try {
+    const base = baseScan(repoRoot);
+    const draftCandidate = {
+      ...candidate(),
+      id: "draft-project-grid",
+      name: "Add or Update Project Grid Draft",
+      promotion_level: "draft" as const,
+      workflowQuality: 0.65,
+      promotionReasons: ["Pattern confidence is below agent-ready threshold."]
+    };
+    generateSkillDrafts(base, {
+      repoRoot,
+      generatedAt: "2026-01-01T00:00:00Z",
+      commitsAnalyzed: 1,
+      candidates: [draftCandidate]
+    });
+
+    assert.equal(existsSync(join(repoRoot, ".compactor", "draft-skills", "draft-project-grid", "SKILL.md")), true);
+
+    const approved = approveSkill(repoRoot, "draft-project-grid", "2026-01-05T00:00:00Z");
+
+    assert.equal(approved.human_approved, true);
+    assert.equal(approved.status, "fresh");
+    assert.equal(approved.promotion_level, "agent_ready");
+    assert.equal(existsSync(join(repoRoot, ".compactor", "draft-skills", "draft-project-grid", "SKILL.md")), false);
+    assert.equal(existsSync(join(repoRoot, ".compactor", "skills", "draft-project-grid", "SKILL.md")), true);
+
+    const markdown = readFileSync(join(repoRoot, ".compactor", "skills", "draft-project-grid", "SKILL.md"), "utf8");
+    assert.match(markdown, /^Status: fresh/);
+    assert.match(markdown, /Human approved: true/);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -190,6 +228,15 @@ function candidate(): CandidateSkill {
   return {
     id: "build-project-grid",
     name: "Build Project Grid",
+    taskDescription: "Use this for orders grid UI changes involving components, screens, API client wiring, or related UI tests.",
+    outputType: "skill",
+    promotion_level: "agent_ready",
+    primaryArea: "frontend",
+    primaryAreaShare: 1,
+    workflowQuality: 0.9,
+    generatedArtifactEvidenceShare: 0,
+    promotionReasons: ["Promoted to skill."],
+    reviewNotes: ["Promoted because the cluster has a dominant area and actionable workflow."],
     patternConfidence: 0.82,
     namingConfidence: 0.74,
     confidence: 0.82,

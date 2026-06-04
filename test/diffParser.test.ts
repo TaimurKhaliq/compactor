@@ -67,3 +67,22 @@ test("extracts describe, it, and test names from added lines", () => {
 
   assert.deepEqual(names, ["keeps summaries small", "reads diffs", "scan command"]);
 });
+
+test("does not extract CSS functions as code functions", () => {
+  const diff = [
+    "diff --git a/src/styles/app.css b/src/styles/app.css",
+    "index 1111111..2222222 100644",
+    "--- a/src/styles/app.css",
+    "+++ b/src/styles/app.css",
+    "@@ -1,3 +1,6 @@",
+    "+.button {",
+    "+  color: var(--text-color);",
+    "+  background: rgba(10, 20, 30, 0.8);",
+    "+}"
+  ].join("\n");
+
+  const summary = parseUnifiedDiff(diff);
+
+  assert.equal(summary.signals.some((signal) => signal.type === "function_added" && /^(var|rgba)$/.test(signal.value)), false);
+  assert.equal(summary.files[0]?.addedFunctions.length, 0);
+});

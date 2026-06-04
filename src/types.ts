@@ -140,6 +140,15 @@ export interface EvidenceCommit {
 export interface CandidateSkill {
   id: string;
   name: string;
+  taskDescription?: string;
+  outputType: "skill" | "pattern";
+  promotion_level: "agent_ready" | "draft" | "pattern_candidate";
+  primaryArea: "frontend" | "backend" | "db" | "infra" | "tests" | "docs" | "cli" | "mixed" | "unknown";
+  primaryAreaShare: number;
+  workflowQuality: number;
+  generatedArtifactEvidenceShare: number;
+  promotionReasons: string[];
+  reviewNotes: string[];
   patternConfidence: number;
   namingConfidence: number;
   confidence: number;
@@ -165,7 +174,7 @@ export interface CandidateSkill {
   rationale: string;
 }
 
-export type SkillStatus = "fresh" | "stale" | "drifting" | "deprecated";
+export type SkillStatus = "fresh" | "draft" | "stale" | "drifting" | "deprecated";
 
 export interface SkillPatternSignature {
   hash: string;
@@ -179,6 +188,7 @@ export interface SkillPatternSignature {
 export interface SkillMetadata {
   skill_id: string;
   name: string;
+  task_description?: string;
   created_at: string;
   generated_from_head: string;
   evidence_commits: EvidenceCommit[];
@@ -188,8 +198,11 @@ export interface SkillMetadata {
   validation_commands: string[];
   pattern_confidence: number;
   naming_confidence: number;
+  promotion_level?: "agent_ready" | "draft" | "pattern_candidate";
+  workflow_quality?: number;
   status: SkillStatus;
   last_refreshed_at: string;
+  managed_by?: "compactor" | "human";
   human_approved?: boolean;
   approved_at?: string;
   validation_warnings?: string[];
@@ -224,6 +237,10 @@ export interface MiningResult {
   generatedAt: string;
   commitsAnalyzed: number;
   candidates: CandidateSkill[];
+  duplicateHandling?: {
+    mergedDuplicateDrafts: number;
+    suppressedDuplicateDrafts: number;
+  };
 }
 
 export interface GeneratedSkillFile {
@@ -232,9 +249,17 @@ export interface GeneratedSkillFile {
   metadataPath?: string;
 }
 
+export interface GeneratedPatternFile {
+  patternId: string;
+  path: string;
+}
+
 export interface GenerationResult {
   repoRoot: string;
   generatedAt: string;
   agentsPath: string;
   skillFiles: GeneratedSkillFile[];
+  draftSkillFiles: GeneratedSkillFile[];
+  patternFiles: GeneratedPatternFile[];
+  archivedSkillCount: number;
 }

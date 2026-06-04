@@ -9,6 +9,7 @@ import { generateSkillDrafts } from "./skills/skillGenerator.js";
 import {
   approveSkill,
   deprecateSkill,
+  readDraftSkillMetadata,
   readSkillMetadata,
   refreshSkills,
   renderAgentsMarkdownFromMetadata,
@@ -113,9 +114,9 @@ function runMine(options: CliOptions): void {
     return;
   }
 
-  console.log(`Mined ${mining.candidates.length} candidate skills from ${scan.commitsAnalyzed} commits`);
+  console.log(`Mined ${mining.candidates.length} candidates from ${scan.commitsAnalyzed} commits`);
   for (const candidate of mining.candidates) {
-    console.log(`- ${candidate.name} (${Math.round(candidate.confidence * 100)}%): ${candidate.evidenceCommits.length} commits`);
+    console.log(`- ${candidate.name} [${candidate.outputType}] (${Math.round(candidate.confidence * 100)}%): ${candidate.evidenceCommits.length} commits`);
   }
   console.log(`Cache written to ${cachePath(scan.repoRoot, "candidate-skills.json")}`);
 }
@@ -132,15 +133,7 @@ function runGenerate(options: CliOptions): void {
   }
 
   console.log(`Generated AGENTS draft: ${result.agentsPath}`);
-  if (result.skillFiles.length === 0) {
-    console.log("No skill drafts generated because no repeated candidates were found.");
-    return;
-  }
-
-  console.log("Generated skill drafts:");
-  for (const file of result.skillFiles) {
-    console.log(`- ${file.path}`);
-  }
+  printGeneratedFiles(result);
 }
 
 function runReport(options: CliOptions): void {
@@ -156,7 +149,7 @@ function runAnalyze(options: CliOptions): void {
   const mining = mineAndCache(scan);
   const generation = generateSkillDrafts(scan, mining);
   writeCache(scan.repoRoot, "generation-result.json", generation);
-  const report = generateReport(scan, mining);
+  const report = generateReport(scan, mining, { archivedSkillCount: generation.archivedSkillCount });
   writeCache(scan.repoRoot, "report.txt", report);
 
   if (options.json) {
@@ -171,14 +164,7 @@ function runAnalyze(options: CliOptions): void {
 
   console.log(report);
   console.log(`Generated AGENTS draft: ${generation.agentsPath}`);
-  if (generation.skillFiles.length > 0) {
-    console.log("Generated skill drafts:");
-    for (const file of generation.skillFiles) {
-      console.log(`- ${file.path}`);
-    }
-  } else {
-    console.log("No skill drafts generated because no repeated candidates were found.");
-  }
+  printGeneratedFiles(generation);
 }
 
 function runExplain(skillId: string, options: CliOptions): void {
@@ -218,7 +204,7 @@ function runValidateSkills(options: CliOptions): void {
 function runApprove(skillId: string, options: CliOptions): void {
   const scan = scanAndCache(options);
   const metadata = approveSkill(scan.repoRoot, skillId);
-  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, readSkillMetadata(scan.repoRoot)), "utf8");
+  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, [...readSkillMetadata(scan.repoRoot), ...readDraftSkillMetadata(scan.repoRoot)]), "utf8");
 
   if (options.json) {
     printJson(metadata);
@@ -231,7 +217,7 @@ function runApprove(skillId: string, options: CliOptions): void {
 function runDeprecate(skillId: string, options: CliOptions): void {
   const scan = scanAndCache(options);
   const metadata = deprecateSkill(scan.repoRoot, skillId);
-  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, readSkillMetadata(scan.repoRoot)), "utf8");
+  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, [...readSkillMetadata(scan.repoRoot), ...readDraftSkillMetadata(scan.repoRoot)]), "utf8");
 
   if (options.json) {
     printJson(metadata);
@@ -433,6 +419,35 @@ function cachePath(repoRoot: string, name: string): string {
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+function printGeneratedFiles(result: ReturnType<typeof generateSkillDrafts>): void {
+  if (result.archivedSkillCount > 0) {
+    console.log(`Archived stale generated skills: ${result.archivedSkillCount}`);
+  }
+
+  if (result.skillFiles.length > 0) {
+    console.log("Generated skill drafts:");
+    for (const file of result.skillFiles) {
+      console.log(`- ${file.path}`);
+    }
+  } else {
+    console.log("No skill drafts promoted. Review pattern candidates for noisy or broad clusters.");
+  }
+
+  if (result.draftSkillFiles.length > 0) {
+    console.log("Generated draft skills:");
+    for (const file of result.draftSkillFiles) {
+      console.log(`- ${file.path}`);
+    }
+  }
+
+  if (result.patternFiles.length > 0) {
+    console.log("Generated pattern candidates:");
+    for (const file of result.patternFiles) {
+      console.log(`- ${file.path}`);
+    }
+  }
 }
 
 function printHelp(): void {

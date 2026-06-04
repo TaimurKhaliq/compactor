@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CandidateSkill,
@@ -33,6 +33,7 @@ export function createSkillMetadata(scan: ScanResult, candidate: CandidateSkill,
   return {
     skill_id: candidate.id,
     name: candidate.name,
+    task_description: candidate.taskDescription,
     created_at: now,
     generated_from_head: currentHead(scan),
     evidence_commits: candidate.evidenceCommits.slice(0, 20),
@@ -42,8 +43,11 @@ export function createSkillMetadata(scan: ScanResult, candidate: CandidateSkill,
     validation_commands: stableUnique(candidate.suggestedValidationCommands),
     pattern_confidence: candidate.patternConfidence,
     naming_confidence: candidate.namingConfidence,
-    status: "fresh",
+    promotion_level: candidate.promotion_level,
+    workflow_quality: candidate.workflowQuality,
+    status: candidate.promotion_level === "draft" ? "draft" : "fresh",
     last_refreshed_at: now,
+    managed_by: "compactor",
     human_approved: false,
     validation_warnings: [],
     drift_reasons: []
@@ -76,15 +80,22 @@ export function writeSkillMetadata(skillDir: string, metadata: SkillMetadata, pr
 }
 
 export function readSkillMetadata(repoRoot: string): SkillMetadata[] {
-  const skillsDir = join(repoRoot, ".compactor", "skills");
-  if (!existsSync(skillsDir)) {
+  return readMetadataFromDir(join(repoRoot, ".compactor", "skills"));
+}
+
+export function readDraftSkillMetadata(repoRoot: string): SkillMetadata[] {
+  return readMetadataFromDir(join(repoRoot, ".compactor", "draft-skills"));
+}
+
+function readMetadataFromDir(directory: string): SkillMetadata[] {
+  if (!existsSync(directory)) {
     return [];
   }
 
-  return readdirSync(skillsDir, { withFileTypes: true })
+  return readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .flatMap((entry) => {
-      const metadataPath = join(skillsDir, entry.name, "metadata.json");
+      const metadataPath = join(directory, entry.name, "metadata.json");
       if (!existsSync(metadataPath)) {
         return [];
       }
@@ -103,6 +114,10 @@ export function renderSkillBanner(metadata: SkillMetadata): string {
 
   if (metadata.human_approved) {
     lines.push(`Human approved: true${metadata.approved_at ? ` (${metadata.approved_at})` : ""}`);
+  }
+
+  if (metadata.status === "draft" || metadata.promotion_level === "draft") {
+    lines.push("This is a generated draft skill. It may help an agent, but it requires human review before being treated as trusted project guidance.");
   }
 
   if (metadata.status === "stale" || metadata.status === "drifting") {
@@ -141,14 +156,44 @@ export function validateSkills(scan: ScanResult, options: LifecycleOptions = {})
 }
 
 export function approveSkill(repoRoot: string, skillId: string, now = new Date().toISOString()): SkillMetadata {
+  const draft = findDraftSkillMetadata(repoRoot, skillId);
+  if (draft) {
+    return approveDraftSkill(repoRoot, draft, now);
+  }
+
   const metadata = requireSkillMetadata(repoRoot, skillId);
   const updated: SkillMetadata = {
     ...metadata,
     human_approved: true,
     approved_at: now,
+    status: "fresh",
+    promotion_level: "agent_ready",
     last_refreshed_at: now
   };
   const skillDir = join(repoRoot, ".compactor", "skills", metadata.skill_id);
+  writeSkillMetadata(skillDir, updated, true);
+  refreshSkillMarkdownBanner(skillDir, updated);
+  return updated;
+}
+
+function approveDraftSkill(repoRoot: string, metadata: SkillMetadata, now: string): SkillMetadata {
+  const draftDir = join(repoRoot, ".compactor", "draft-skills", metadata.skill_id);
+  const skillDir = join(repoRoot, ".compactor", "skills", metadata.skill_id);
+  if (existsSync(skillDir)) {
+    throw new Error(`Cannot approve draft because a skill already exists with id: ${metadata.skill_id}`);
+  }
+
+  mkdirSync(join(repoRoot, ".compactor", "skills"), { recursive: true });
+  renameSync(draftDir, skillDir);
+
+  const updated: SkillMetadata = {
+    ...metadata,
+    human_approved: true,
+    approved_at: now,
+    status: "fresh",
+    promotion_level: "agent_ready",
+    last_refreshed_at: now
+  };
   writeSkillMetadata(skillDir, updated, true);
   refreshSkillMarkdownBanner(skillDir, updated);
   return updated;
@@ -200,19 +245,28 @@ export function renderLifecycleReport(report: SkillLifecycleReport): string {
   ].join("\n");
 }
 
-export function renderAgentsMarkdownFromMetadata(scan: ScanResult, metadata: SkillMetadata[]): string {
-  const active = metadata.filter((skill) => skill.status !== "deprecated" && (skill.status === "fresh" || skill.human_approved));
-  const needsReview = metadata.filter((skill) => skill.status !== "deprecated" && (skill.status === "stale" || skill.status === "drifting") && !skill.human_approved);
+export function renderAgentsMarkdownFromMetadata(scan: ScanResult, metadata: SkillMetadata[], patternCandidates: CandidateSkill[] = []): string {
+  const active = metadata.filter((skill) => skill.status !== "deprecated" && skill.status !== "draft" && (skill.promotion_level === "agent_ready" || skill.status === "fresh" || skill.human_approved));
+  const drafts = metadata.filter((skill) => skill.status !== "deprecated" && (skill.status === "draft" || skill.promotion_level === "draft") && !skill.human_approved);
+  const needsReview = metadata.filter((skill) => skill.status !== "deprecated" && skill.status !== "draft" && (skill.status === "stale" || skill.status === "drifting") && !skill.human_approved);
 
   const activeLines =
     active.length === 0
-      ? ["- No fresh or human-approved generated skills are available yet."]
+      ? ["- No agent-ready skills were generated. Review draft skills and pattern candidates before creating trusted guidance."]
       : active.map(
           (skill) =>
-            `- ${skill.name}: use .compactor/skills/${skill.skill_id}/SKILL.md when work matches ${skill.generic_signals
-              .slice(0, 4)
-              .join(", ") || "the observed commit evidence"}.`
+            `- ${skill.name}: ${metadataTaskDescription(skill)} Use .compactor/skills/${skill.skill_id}/SKILL.md.`
         );
+
+  const draftLines =
+    drafts.length === 0
+      ? ["- None"]
+      : drafts.map((skill) => `- ${skill.name}: ${metadataTaskDescription(skill)} Review .compactor/draft-skills/${skill.skill_id}/SKILL.md before approving.`);
+
+  const patternLines =
+    patternCandidates.length === 0
+      ? ["- None"]
+      : patternCandidates.map((candidate) => `- ${candidate.name}: review .compactor/patterns/${candidate.id}/PATTERN.md.`);
 
   const reviewLines =
     needsReview.length === 0
@@ -226,14 +280,20 @@ export function renderAgentsMarkdownFromMetadata(scan: ScanResult, metadata: Ski
     "",
     "## Repository guidance",
     "- Start from the nearest existing implementation before introducing a new pattern.",
-    "- Match work to generated skills by generic signals, common directories, and representative evidence commits.",
+    "- Match work to generated skills by task description, relevant examples, and representative evidence commits.",
     "- Run only validation commands that exist in this repository.",
     "",
-    "## Candidate skills",
+    "## Approved / agent-ready skills",
     ...activeLines,
+    "",
+    "## Draft skills needing review",
+    ...draftLines,
     "",
     "## Skills needing review",
     ...reviewLines,
+    "",
+    "## Pattern candidates",
+    ...patternLines,
     "",
     "## Scan summary",
     `- Commits analyzed: ${scan.commitsAnalyzed}`,
@@ -241,6 +301,15 @@ export function renderAgentsMarkdownFromMetadata(scan: ScanResult, metadata: Ski
     `- Generated at: ${new Date().toISOString()}`,
     ""
   ].join("\n");
+}
+
+function metadataTaskDescription(skill: SkillMetadata): string {
+  if (skill.task_description) {
+    return skill.task_description;
+  }
+
+  const name = skill.name.replace(/\.$/, "");
+  return `Use this for ${name.charAt(0).toLowerCase()}${name.slice(1)} changes.`;
 }
 
 function refreshedMetadata(scan: ScanResult, metadata: SkillMetadata, evaluation: Evaluation, now: string): SkillMetadata {
@@ -398,6 +467,10 @@ function requireSkillMetadata(repoRoot: string, skillId: string): SkillMetadata 
     throw new Error(`Skill metadata not found: ${skillId}`);
   }
   return metadata;
+}
+
+function findDraftSkillMetadata(repoRoot: string, skillId: string): SkillMetadata | undefined {
+  return readDraftSkillMetadata(repoRoot).find((skill) => skill.skill_id === skillId || slug(skill.name) === skillId);
 }
 
 function refreshSkillMarkdownBanner(skillDir: string, metadata: SkillMetadata): void {

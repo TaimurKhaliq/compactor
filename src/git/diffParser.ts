@@ -164,11 +164,12 @@ function applyFileHeaderLine(file: MutableFileDiff, line: string): void {
 
 function finalizeFileDiff(file: MutableFileDiff): FileDiffSummary {
   const addedLines = file.patchLines.filter((line) => line.kind === "added").map((line) => line.text);
-  const addedExports = extractAddedExports(addedLines);
-  const addedFunctions = extractAddedFunctions(addedLines);
-  const addedClasses = extractAddedClasses(addedLines);
-  const addedInterfacesOrTypes = extractAddedInterfacesOrTypes(addedLines);
-  const addedEnums = extractAddedEnums(addedLines);
+  const shouldExtractCodeSymbols = isCodeSymbolFile(file.filePath);
+  const addedExports = shouldExtractCodeSymbols ? extractAddedExports(addedLines) : [];
+  const addedFunctions = shouldExtractCodeSymbols ? extractAddedFunctions(addedLines) : [];
+  const addedClasses = shouldExtractCodeSymbols ? extractAddedClasses(addedLines) : [];
+  const addedInterfacesOrTypes = shouldExtractCodeSymbols ? extractAddedInterfacesOrTypes(addedLines) : [];
+  const addedEnums = shouldExtractCodeSymbols ? extractAddedEnums(addedLines) : [];
   const addedTestNames = extractTestNames(addedLines);
   const addedCliCommands = extractCliCommands(file.filePath, addedLines);
   const addedCliOptions = extractCliOptions(file.filePath, addedLines);
@@ -464,6 +465,10 @@ function isTestFile(filePath: string): boolean {
 
 function isFixtureFile(filePath: string): boolean {
   return /(^|\/)(fixtures?|testdata|test-data|__fixtures__)(\/|$)/i.test(filePath);
+}
+
+function isCodeSymbolFile(filePath: string): boolean {
+  return /\.(tsx?|jsx?|py|java|kt|cs)$/i.test(filePath);
 }
 
 function uniqueSorted(values: string[]): string[] {

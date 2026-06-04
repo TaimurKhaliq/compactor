@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { discoverValidationCommands, preferredValidationCommands, readPackageScripts } from "../src/git/packageScripts.js";
+import { discoverValidationCommands, discoverValidationCommandsForFiles, preferredValidationCommands, readPackageScripts } from "../src/git/packageScripts.js";
 
 test("reads package.json scripts and filters preferred validation commands", () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "compactor-scripts-"));
@@ -58,6 +58,40 @@ test("discovers validation commands beyond package.json", () => {
     assert.ok(commands.includes("cargo test"));
     assert.ok(commands.includes("mvn test"));
     assert.ok(commands.includes("dotnet test"));
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("discovers validation commands from the nearest nested package", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-nested-validation-"));
+
+  try {
+    mkdirSync(join(repoRoot, "sniffer"), { recursive: true });
+    writeFileSync(
+      join(repoRoot, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "pytest"
+        }
+      })
+    );
+    writeFileSync(
+      join(repoRoot, "sniffer", "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node --test",
+          typecheck: "tsc --noEmit"
+        }
+      })
+    );
+
+    const commands = discoverValidationCommandsForFiles(repoRoot, [
+      "sniffer/src/cli.ts",
+      "sniffer/test/cli.test.ts"
+    ]);
+
+    assert.deepEqual(commands, ["npm --prefix sniffer test", "npm --prefix sniffer run typecheck"]);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
