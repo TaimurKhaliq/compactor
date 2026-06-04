@@ -301,6 +301,45 @@ test("repeated CLI option actions produce command-specific workflow", () => {
     writeFileSync(join(repoRoot, "Cargo.toml"), "[package]\nname = \"grit\"\n");
     const commits = ["bundle", "diff", "log"].map((name, index) => commit(`${index + 1}`.repeat(16), `Update ${name} command option`, [
       `grit/src/commands/${name}.rs`,
+      `grit/tests/commands/${name}_test.rs`,
+      "docs/index.html",
+      "t6-plan.md"
+    ], [
+      { type: "cli_command_changed", value: "--format", filePath: `grit/src/commands/${name}.rs` },
+      { type: "function_added", value: `${name}Command`, filePath: `grit/src/commands/${name}.rs` },
+      { type: "docs_changed", value: "command help", filePath: "docs/index.html" },
+      { type: "test_case_added", value: `${name} command option`, filePath: `grit/tests/commands/${name}_test.rs` }
+    ]));
+
+    const candidate = requireCandidate(minePatterns(scan(commits, repoRoot)).candidates, (skill) => skill.learnedSurface?.taskKind === "commands");
+    const markdown = renderSkillMarkdown(candidate);
+    const coreWorkflow = markdown.split("### Optional supporting updates")[0] ?? markdown;
+
+    assert.match(markdown, /### Core workflow/);
+    assert.match(markdown, /### Optional supporting updates/);
+    assert.match(markdown, /Use this when adding or changing command behavior, flags, parsing, or command-specific error handling in `grit\/src\/commands`/);
+    assert.match(markdown, /Add or update command option parsing/);
+    assert.match(markdown, /Update command handler behavior/);
+    assert.match(markdown, /Add or update command tests/);
+    assert.match(markdown, /Run the primary validation command/);
+    assert.doesNotMatch(coreWorkflow, /Update docs\/help text/);
+    assert.match(markdown, /Update docs\/help text only if the command's user-facing behavior changes/);
+    assert.ok(candidate.workflowQuality >= 0.75);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("Rust command validation excludes Python commands unless Python files are surface-relevant", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-rust-validation-scope-"));
+
+  try {
+    mkdirSync(join(repoRoot, "tests"), { recursive: true });
+    writeFileSync(join(repoRoot, "Cargo.toml"), "[package]\nname = \"grit\"\n");
+    writeFileSync(join(repoRoot, "Makefile"), "test:\n\tcargo test\n\nbuild:\n\tcargo build\n");
+    writeFileSync(join(repoRoot, "tests", "python_smoke.py"), "def test_smoke():\n    assert True\n");
+    const commits = ["bundle", "diff", "log"].map((name, index) => commit(`${index + 1}`.repeat(16), `Update ${name} command option`, [
+      `grit/src/commands/${name}.rs`,
       `grit/tests/commands/${name}_test.rs`
     ], [
       { type: "cli_command_changed", value: "--format", filePath: `grit/src/commands/${name}.rs` },
@@ -311,12 +350,12 @@ test("repeated CLI option actions produce command-specific workflow", () => {
     const candidate = requireCandidate(minePatterns(scan(commits, repoRoot)).candidates, (skill) => skill.learnedSurface?.taskKind === "commands");
     const markdown = renderSkillMarkdown(candidate);
 
-    assert.match(markdown, /Add or update command option parsing/);
-    assert.match(markdown, /Update command handler behavior/);
-    assert.match(markdown, /Add or update command tests/);
-    assert.match(markdown, /Run the discovered validation command/);
-    assert.doesNotMatch(markdown, /Update documentation that directly describes/);
-    assert.ok(candidate.workflowQuality >= 0.75);
+    assert.deepEqual(candidate.workflowProfile?.primaryValidationCommands, ["cargo test"]);
+    assert.deepEqual(candidate.workflowProfile?.secondaryValidationCommands, ["make test", "make build"]);
+    assert.equal(candidate.suggestedValidationCommands.includes("python -m unittest"), false);
+    assert.match(markdown, /Primary validation:\n- cargo test/);
+    assert.match(markdown, /Secondary validation:\n- make test\n- make build/);
+    assert.doesNotMatch(markdown, /python -m unittest/);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }

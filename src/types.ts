@@ -222,6 +222,7 @@ export interface WorkflowStepEvidence {
   text: string;
   count: number;
   files: string[];
+  tier?: "core" | "supporting";
 }
 
 export interface WorkflowProfile {
@@ -230,7 +231,11 @@ export interface WorkflowProfile {
   testActions: WorkflowActionSummary[];
   supportingArtifactActions: WorkflowActionSummary[];
   validationCommands: string[];
+  primaryValidationCommands: string[];
+  secondaryValidationCommands: string[];
   steps: WorkflowStepEvidence[];
+  coreSteps: WorkflowStepEvidence[];
+  supportingSteps: WorkflowStepEvidence[];
   usesGenericFallback: boolean;
 }
 
@@ -296,7 +301,7 @@ export interface CandidateSkill {
   };
 }
 
-export type SkillStatus = "fresh" | "draft" | "stale" | "drifting" | "deprecated";
+export type SkillStatus = "fresh" | "draft" | "stale" | "drifting" | "deprecated" | "rejected";
 
 export interface SkillPatternSignature {
   hash: string;
@@ -327,8 +332,46 @@ export interface SkillMetadata {
   managed_by?: "compactor" | "human";
   human_approved?: boolean;
   approved_at?: string;
+  approved_by?: string;
+  rejected_at?: string;
+  rejected_by?: string;
+  deprecated_at?: string;
+  deprecated_by?: string;
+  promoted_from_pattern?: string;
+  human_named?: boolean;
+  proposed_name?: string;
+  human_edited?: boolean;
+  renamed_at?: string;
+  renamed_by?: string;
   validation_warnings?: string[];
   drift_reasons?: string[];
+}
+
+export interface DraftSkillReviewSummary {
+  skill_id: string;
+  name: string;
+  confidence: number;
+  learned_surface: string;
+  representative_files: string[];
+  validation_commands: string[];
+  skill_path: string;
+}
+
+export interface SkillReviewReport {
+  repoRoot: string;
+  agentReadySkills: SkillMetadata[];
+  draftSkills: DraftSkillReviewSummary[];
+  patternCandidates: Array<{
+    pattern_id: string;
+    name: string;
+    path: string;
+  }>;
+  archivedOrDeprecatedSkills: Array<{
+    skill_id: string;
+    name: string;
+    status: SkillStatus;
+    path: string;
+  }>;
 }
 
 export interface SkillValidationSummary {
@@ -384,4 +427,24 @@ export interface GenerationResult {
   draftSkillFiles: GeneratedSkillFile[];
   patternFiles: GeneratedPatternFile[];
   archivedSkillCount: number;
+}
+
+export type AgentIntegrationTarget = "codex" | "claude" | "cursor" | "copilot" | "all";
+
+export interface AgentIntegrationFileChange {
+  target: Exclude<AgentIntegrationTarget, "all">;
+  path: string;
+  action: "create" | "update" | "unchanged";
+  changed: boolean;
+}
+
+export interface AgentIntegrationResult {
+  repoRoot: string;
+  generatedAt: string;
+  dryRun: boolean;
+  target: AgentIntegrationTarget;
+  approvedSkillCount: number;
+  draftSkillCount: number;
+  patternCandidateCount: number;
+  files: AgentIntegrationFileChange[];
 }

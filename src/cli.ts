@@ -1,26 +1,44 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { minePatterns } from "./analysis/patternMiner.js";
 import { scanRepository } from "./git/history.js";
+import { prepareRepository } from "./git/repository.js";
+import { applyAgentEntrypoints, refreshExistingAgentEntrypoints } from "./integrations/agentEntrypoints.js";
 import { generateSkillExplanation } from "./report/explainGenerator.js";
 import { generateReport } from "./report/reportGenerator.js";
 import { generateSkillDrafts } from "./skills/skillGenerator.js";
 import {
   approveSkill,
   deprecateSkill,
-  readDraftSkillMetadata,
-  readSkillMetadata,
+  promotePatternToDraft,
+  rejectDraftSkill,
+  renameDraftSkill,
+  renderSkillReviewDashboard,
   refreshSkills,
-  renderAgentsMarkdownFromMetadata,
   renderLifecycleReport,
+  reviewSkills,
   validateSkills
 } from "./skills/lifecycle.js";
-import type { MiningResult, ScanResult } from "./types.js";
+import type { AgentIntegrationResult, AgentIntegrationTarget, MiningResult, ScanResult } from "./types.js";
 
 interface CliOptions {
   repo?: string;
   limit: number;
+  json: boolean;
+  help: boolean;
+}
+
+interface ApplyCliOptions {
+  repo?: string;
+  target: AgentIntegrationTarget;
+  dryRun: boolean;
+  json: boolean;
+  help: boolean;
+}
+
+interface RepoOnlyCliOptions {
+  repo?: string;
   json: boolean;
   help: boolean;
 }
@@ -56,6 +74,50 @@ function main(): void {
       return;
     }
     runDeprecate(skillId, options);
+    return;
+  }
+
+  if (command === "reject") {
+    const { skillId, options } = parseSkillActionArgs(args, command);
+    if (options.help) {
+      printHelp();
+      return;
+    }
+    runReject(skillId, options);
+    return;
+  }
+
+  if (command === "promote-pattern" || command === "rename-draft") {
+    const { id, name, options } = parseNamedActionArgs(args, command);
+    if (options.help) {
+      printHelp();
+      return;
+    }
+    if (command === "promote-pattern") {
+      runPromotePattern(id, name, options);
+      return;
+    }
+    runRenameDraft(id, name, options);
+    return;
+  }
+
+  if (command === "apply") {
+    const options = parseApplyArgs(args);
+    if (options.help) {
+      printHelp();
+      return;
+    }
+    runApply(options);
+    return;
+  }
+
+  if (command === "review") {
+    const options = parseRepoOnlyArgs(args);
+    if (options.help) {
+      printHelp();
+      return;
+    }
+    runReview(options);
     return;
   }
 
@@ -201,30 +263,117 @@ function runValidateSkills(options: CliOptions): void {
   console.log(output);
 }
 
-function runApprove(skillId: string, options: CliOptions): void {
-  const scan = scanAndCache(options);
-  const metadata = approveSkill(scan.repoRoot, skillId);
-  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, [...readSkillMetadata(scan.repoRoot), ...readDraftSkillMetadata(scan.repoRoot)]), "utf8");
+function runApply(options: ApplyCliOptions): void {
+  const result = applyAgentEntrypoints({
+    repo: options.repo,
+    target: options.target,
+    dryRun: options.dryRun
+  });
 
   if (options.json) {
-    printJson(metadata);
+    printJson(result);
+    return;
+  }
+
+  printApplyResult(result);
+}
+
+function runApprove(skillId: string, options: CliOptions): void {
+  const repoRoot = resolveRepoRoot(options.repo);
+  const draftPath = join(repoRoot, ".compactor", "draft-skills", skillId);
+  const wasDraft = existsSync(draftPath);
+  const metadata = approveSkill(repoRoot, skillId);
+  const integration = refreshExistingAgentEntrypoints(repoRoot);
+
+  if (options.json) {
+    printJson({ metadata, integration });
     return;
   }
 
   console.log(`Approved skill: ${metadata.name}`);
+  if (wasDraft) {
+    console.log("Moved:");
+    console.log(`.compactor/draft-skills/${metadata.skill_id}`);
+    console.log("-> .compactor/skills/" + metadata.skill_id);
+  }
+  console.log("Updated .compactor/AGENTS.md");
+  printIntegrationRefreshSummary(integration);
+}
+
+function runReject(skillId: string, options: CliOptions): void {
+  const repoRoot = resolveRepoRoot(options.repo);
+  const metadata = rejectDraftSkill(repoRoot, skillId);
+  const integration = refreshExistingAgentEntrypoints(repoRoot);
+
+  if (options.json) {
+    printJson({ metadata, integration });
+    return;
+  }
+
+  console.log(`Rejected draft skill: ${metadata.name}`);
+  console.log(`Archived: .compactor/archive/rejected-skills/${metadata.skill_id}`);
+  console.log("Updated .compactor/AGENTS.md");
+  printIntegrationRefreshSummary(integration);
 }
 
 function runDeprecate(skillId: string, options: CliOptions): void {
-  const scan = scanAndCache(options);
-  const metadata = deprecateSkill(scan.repoRoot, skillId);
-  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, [...readSkillMetadata(scan.repoRoot), ...readDraftSkillMetadata(scan.repoRoot)]), "utf8");
+  const repoRoot = resolveRepoRoot(options.repo);
+  const metadata = deprecateSkill(repoRoot, skillId);
+  const integration = refreshExistingAgentEntrypoints(repoRoot);
 
   if (options.json) {
-    printJson(metadata);
+    printJson({ metadata, integration });
     return;
   }
 
   console.log(`Deprecated skill: ${metadata.name}`);
+  console.log(`Archived: .compactor/archive/deprecated-skills/${metadata.skill_id}`);
+  console.log("Updated .compactor/AGENTS.md");
+  printIntegrationRefreshSummary(integration);
+}
+
+function runPromotePattern(patternId: string, name: string, options: RepoOnlyCliOptions): void {
+  const repoRoot = resolveRepoRoot(options.repo);
+  const metadata = promotePatternToDraft(repoRoot, patternId, name);
+  const integration = refreshExistingAgentEntrypoints(repoRoot);
+
+  if (options.json) {
+    printJson({ metadata, integration });
+    return;
+  }
+
+  console.log(`Promoted pattern to draft skill: ${metadata.name}`);
+  console.log(`Created: .compactor/draft-skills/${metadata.skill_id}`);
+  console.log("Run: compactor approve " + metadata.skill_id);
+  printIntegrationRefreshSummary(integration);
+}
+
+function runRenameDraft(skillId: string, name: string, options: RepoOnlyCliOptions): void {
+  const repoRoot = resolveRepoRoot(options.repo);
+  const metadata = renameDraftSkill(repoRoot, skillId, name);
+  const integration = refreshExistingAgentEntrypoints(repoRoot);
+
+  if (options.json) {
+    printJson({ metadata, integration });
+    return;
+  }
+
+  console.log(`Renamed draft skill: ${metadata.name}`);
+  console.log(`Draft id: ${metadata.skill_id}`);
+  console.log("Updated .compactor/AGENTS.md");
+  printIntegrationRefreshSummary(integration);
+}
+
+function runReview(options: RepoOnlyCliOptions): void {
+  const repoRoot = resolveRepoRoot(options.repo);
+  const report = reviewSkills(repoRoot);
+
+  if (options.json) {
+    printJson(report);
+    return;
+  }
+
+  console.log(renderSkillReviewDashboard(report));
 }
 
 function scanAndCache(options: CliOptions): ScanResult {
@@ -243,6 +392,100 @@ function mineAndCache(scan: ScanResult): MiningResult {
   const mining = minePatterns(scan);
   writeCache(scan.repoRoot, "candidate-skills.json", mining);
   return mining;
+}
+
+function resolveRepoRoot(repo?: string): string {
+  return prepareRepository({
+    repo
+  }).repoRoot;
+}
+
+function parseApplyArgs(args: string[]): ApplyCliOptions {
+  const options: ApplyCliOptions = {
+    target: "codex",
+    dryRun: false,
+    json: false,
+    help: false
+  };
+  let targetProvided = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+      continue;
+    }
+
+    if (arg === "--json") {
+      options.json = true;
+      continue;
+    }
+
+    if (arg === "--dry-run") {
+      options.dryRun = true;
+      continue;
+    }
+
+    if (arg === "--target") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("--target requires one of: codex, claude, cursor, copilot, all");
+      }
+      options.target = parseApplyTarget(value);
+      targetProvided = true;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--target=")) {
+      options.target = parseApplyTarget(arg.slice("--target=".length));
+      targetProvided = true;
+      continue;
+    }
+
+    if (arg === "--repo") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("--repo requires a path");
+      }
+      options.repo = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--repo=")) {
+      options.repo = arg.slice("--repo=".length);
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    if (options.repo) {
+      throw new Error(`Unexpected positional argument: ${arg}`);
+    }
+
+    options.repo = arg;
+  }
+
+  if (!targetProvided && !options.help) {
+    throw new Error("apply requires --target codex|claude|cursor|copilot|all");
+  }
+
+  return options;
+}
+
+function parseApplyTarget(value: string): AgentIntegrationTarget {
+  if (value === "codex" || value === "claude" || value === "cursor" || value === "copilot" || value === "all") {
+    return value;
+  }
+
+  throw new Error(`Invalid --target value: ${value}`);
 }
 
 function parseOptions(args: string[]): CliOptions {
@@ -401,6 +644,126 @@ function parseSkillActionArgs(args: string[], command: string): { skillId: strin
   };
 }
 
+function parseNamedActionArgs(args: string[], command: string): { id: string; name: string; options: RepoOnlyCliOptions } {
+  let id: string | undefined;
+  let name: string | undefined;
+  const optionArgs: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--name") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("--name requires a value");
+      }
+      name = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--name=")) {
+      name = arg.slice("--name=".length);
+      continue;
+    }
+
+    if (arg === "--help" || arg === "-h" || arg === "--json") {
+      optionArgs.push(arg);
+      continue;
+    }
+
+    if (arg === "--repo" && args[index + 1]) {
+      optionArgs.push(arg, args[index + 1] as string);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--repo=")) {
+      optionArgs.push(arg);
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    if (!id) {
+      id = arg;
+      continue;
+    }
+
+    optionArgs.push(arg);
+  }
+
+  const options = parseRepoOnlyArgs(optionArgs);
+  if (!id && !options.help) {
+    throw new Error(`${command} requires an id`);
+  }
+  if (!name && !options.help) {
+    throw new Error(`${command} requires --name`);
+  }
+
+  return {
+    id: id ?? "",
+    name: name ?? "",
+    options
+  };
+}
+
+function parseRepoOnlyArgs(args: string[]): RepoOnlyCliOptions {
+  const options: RepoOnlyCliOptions = {
+    json: false,
+    help: false
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--json") {
+      options.json = true;
+      continue;
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+      continue;
+    }
+
+    if (arg === "--repo") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("--repo requires a path");
+      }
+      options.repo = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--repo=")) {
+      options.repo = arg.slice("--repo=".length);
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    if (options.repo) {
+      throw new Error(`Unexpected positional argument: ${arg}`);
+    }
+
+    options.repo = arg;
+  }
+
+  return options;
+}
+
 function parseLimit(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
@@ -453,11 +816,39 @@ function printGeneratedFiles(result: ReturnType<typeof generateSkillDrafts>): vo
   }
 }
 
+function printApplyResult(result: AgentIntegrationResult): void {
+  console.log(result.dryRun ? `Dry run for Compactor agent integration in ${result.repoRoot}` : `Applied Compactor agent integration in ${result.repoRoot}`);
+  console.log(`Approved skills: ${result.approvedSkillCount}`);
+  console.log(`Draft skills: ${result.draftSkillCount}`);
+  console.log(`Pattern candidates: ${result.patternCandidateCount}`);
+
+  for (const file of result.files) {
+    const verb = result.dryRun && file.changed
+      ? `would ${file.action}`
+      : file.action;
+    console.log(`- ${file.target}: ${verb} ${file.path}`);
+  }
+}
+
+function printIntegrationRefreshSummary(result: AgentIntegrationResult): void {
+  const changedFiles = result.files.filter((entry) => entry.changed);
+  if (changedFiles.length === 0) {
+    return;
+  }
+
+  console.log("Updated root integration files:");
+  for (const file of changedFiles) {
+    console.log(`- ${file.target}: ${file.path}`);
+  }
+}
+
 function printHelp(): void {
   console.log(`compactor
 
 Usage:
   compactor analyze [repo-url-or-path] [--limit 50] [--json]
+  compactor apply [repo-url-or-path] --target codex|claude|cursor|copilot|all [--dry-run] [--json]
+  compactor review [repo-url-or-path] [--json]
   compactor explain <skill-id> [repo-url-or-path] [--limit 50]
   compactor scan [--limit 50] [--repo path] [--json]
   compactor mine [--limit 50] [--repo path] [--json]
@@ -466,10 +857,15 @@ Usage:
   compactor refresh [repo-url-or-path] [--limit 50] [--json]
   compactor validate-skills [repo-url-or-path] [--limit 50] [--json]
   compactor approve <skill-id> [repo-url-or-path]
+  compactor reject <skill-id> [repo-url-or-path]
   compactor deprecate <skill-id> [repo-url-or-path]
+  compactor promote-pattern <pattern-id> --name "Skill name" [repo-url-or-path]
+  compactor rename-draft <skill-id> --name "Skill name" [repo-url-or-path]
 
 Commands:
   analyze   Run scan, mine, generate, and report in one shot
+  apply     Write managed Compactor sections into agent instruction entrypoints
+  review    Print skill review dashboard for drafts, patterns, and archives
   explain   Explain why a candidate skill was generated
   scan      Read recent git history and cache commit metadata
   mine      Detect repeated development patterns and cache skill candidates
@@ -478,8 +874,13 @@ Commands:
   refresh   Re-source existing generated skills from newer commits
   validate-skills
             Report stale, drifting, deprecated, and review-needed skills
-  approve   Mark a generated skill as human approved
-  deprecate Mark a generated skill as deprecated
+  approve   Move a draft skill into trusted, human-approved skills
+  reject    Archive a draft skill as rejected
+  deprecate Archive a trusted skill as deprecated
+  promote-pattern
+            Convert a pattern candidate into a named draft skill
+  rename-draft
+            Rename a draft skill and update its metadata
 `);
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@taimurkhaliq/compactor",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Mine Git history into reusable AI coding skills.",
   "type": "module",
   "license": "MIT",

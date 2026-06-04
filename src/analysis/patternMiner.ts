@@ -439,7 +439,11 @@ function cloneWorkflowProfile(profile: WorkflowProfile): WorkflowProfile {
     testActions: profile.testActions.map(cloneWorkflowActionSummary),
     supportingArtifactActions: profile.supportingArtifactActions.map(cloneWorkflowActionSummary),
     validationCommands: [...profile.validationCommands],
+    primaryValidationCommands: [...profile.primaryValidationCommands],
+    secondaryValidationCommands: [...profile.secondaryValidationCommands],
     steps: profile.steps.map((step) => ({ ...step, files: [...step.files] })),
+    coreSteps: profile.coreSteps.map((step) => ({ ...step, files: [...step.files] })),
+    supportingSteps: profile.supportingSteps.map((step) => ({ ...step, files: [...step.files] })),
     usesGenericFallback: profile.usesGenericFallback
   };
 }
@@ -1059,12 +1063,15 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
   const surfaceTerms = learnedSurface?.sourceTerms ?? [];
   const finalDomainTerms = strongLearnedSurface ? surfaceDomainTerms(strongLearnedSurface) : proposal.domainTerms;
   const terms = strongLearnedSurface ? surfaceTerms : unique([...termEvidence.repeated, ...(learnedSurface?.repeatedTerms ?? [])]);
-  const validationCommands = unique([
+  const rawValidationCommands = unique([
     ...(learnedSurface?.validationCommands ?? []),
     ...discoverValidationCommandsForFiles(scan.repoRoot, unique([...commonFiles, ...(learnedSurface?.representativeFiles ?? []), ...(learnedSurface?.coChangingTestFiles ?? [])])),
     ...scan.validationCommands
   ]);
-  const workflowProfile = buildWorkflowProfile(commits, learnedSurface, validationCommands);
+  const validationScopeFiles = unique([...evidenceFiles, ...commonFiles, ...(learnedSurface?.representativeFiles ?? []), ...(learnedSurface?.coChangingTestFiles ?? [])]);
+  const validationProfile = scopeValidationCommands(rawValidationCommands, validationScopeFiles, learnedSurface);
+  const validationCommands = unique([...validationProfile.primary, ...validationProfile.secondary]);
+  const workflowProfile = buildWorkflowProfile(commits, learnedSurface, validationProfile.primary, validationProfile.secondary);
   const taskEvidenceFiles = unique(evidenceFiles);
   const taskArea = effectiveTaskArea(commits, dominant, taskEvidenceFiles, learnedSurface);
   const artifactShare = generatedArtifactEvidenceShare(commits);
@@ -1327,7 +1334,98 @@ function observedChanges(commits: CommitMetadata[], learnedSurface?: LearnedSurf
   return labels.map((label) => `Observed ${label}.`);
 }
 
-function buildWorkflowProfile(commits: CommitMetadata[], learnedSurface: LearnedSurfaceMatch | undefined, validationCommands: string[]): WorkflowProfile | undefined {
+function scopeValidationCommands(commands: string[], files: string[], learnedSurface?: LearnedSurfaceMatch): { primary: string[]; secondary: string[] } {
+  const uniqueCommands = unique(commands);
+  if (uniqueCommands.length === 0) {
+    return { primary: [], secondary: [] };
+  }
+
+  const families = validationFamiliesForFiles(files, learnedSurface);
+  const scoped = uniqueCommands.filter((command) => validationCommandMatchesFamilies(command, families));
+  const candidates = scoped.length > 0 ? scoped : uniqueCommands.filter((command) => commandFamily(command) === "make");
+  const sorted = candidates.sort((a, b) => validationCommandRank(a, families) - validationCommandRank(b, families) || a.localeCompare(b));
+  const primary = sorted.filter((command) => isPrimaryValidationCommand(command, families));
+  const primaryCommands = primary.length > 0 ? primary : sorted.slice(0, 1);
+  const primarySet = new Set(primaryCommands);
+  const secondary = sorted.filter((command) => !primarySet.has(command));
+
+  return {
+    primary: primaryCommands,
+    secondary
+  };
+}
+
+function validationFamiliesForFiles(files: string[], learnedSurface?: LearnedSurfaceMatch): Set<string> {
+  const extensions = new Set([
+    ...(learnedSurface?.dominantExtensions ?? []),
+    ...files.map((file) => path.extname(file).toLowerCase()).filter(Boolean)
+  ]);
+  const families = new Set<string>();
+  const has = (extension: string) => extensions.has(extension);
+
+  if (has(".rs")) families.add("rust");
+  if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].some(has)) families.add("node");
+  if (has(".py")) families.add("python");
+  if (has(".go")) families.add("go");
+  if (has(".cs")) families.add("dotnet");
+  if (has(".java") || has(".kt")) families.add("jvm");
+
+  if (learnedSurface?.taskKind === "commands" && families.size === 0) {
+    families.add("node");
+  }
+
+  return families;
+}
+
+function validationCommandMatchesFamilies(command: string, families: Set<string>): boolean {
+  const family = commandFamily(command);
+  if (family === "make") {
+    return families.size > 0;
+  }
+  if (families.size === 0) {
+    return family !== "python";
+  }
+  return families.has(family);
+}
+
+function commandFamily(command: string): string {
+  if (/^cargo\b/.test(command)) return "rust";
+  if (/^(npm|pnpm|yarn)\b/.test(command)) return "node";
+  if (/^(pytest|python\b)/.test(command)) return "python";
+  if (/^go test\b/.test(command)) return "go";
+  if (/^dotnet\b/.test(command)) return "dotnet";
+  if (/^(mvn|gradle|\.\/gradlew)\b/.test(command)) return "jvm";
+  if (/^make\b/.test(command)) return "make";
+  return "unknown";
+}
+
+function validationCommandRank(command: string, families: Set<string>): number {
+  const family = commandFamily(command);
+  const isTest = /\btest\b|pytest|unittest/.test(command);
+  if (families.has("rust") && command === "cargo test") return 0;
+  if (families.has("node") && command === "npm test") return 0;
+  if (families.has("python") && /^(pytest|python -m unittest)$/.test(command)) return 0;
+  if (families.has("go") && command === "go test ./...") return 0;
+  if (families.has("dotnet") && command === "dotnet test") return 0;
+  if (families.has("jvm") && /^(mvn test|gradle test|\.\/gradlew test)$/.test(command)) return 0;
+  if (family === "make" && command === "make test") return 2;
+  if (family === "make" && command === "make build") return 3;
+  if (isTest) return 4;
+  if (/build|typecheck|lint/.test(command)) return 5;
+  return 9;
+}
+
+function isPrimaryValidationCommand(command: string, families: Set<string>): boolean {
+  if (families.has("rust")) return command === "cargo test";
+  if (families.has("node")) return command === "npm test";
+  if (families.has("python")) return /^(pytest|python -m unittest)$/.test(command);
+  if (families.has("go")) return command === "go test ./...";
+  if (families.has("dotnet")) return command === "dotnet test";
+  if (families.has("jvm")) return /^(mvn test|gradle test|\.\/gradlew test)$/.test(command);
+  return /\btest\b|pytest|unittest/.test(command);
+}
+
+function buildWorkflowProfile(commits: CommitMetadata[], learnedSurface: LearnedSurfaceMatch | undefined, primaryValidationCommands: string[], secondaryValidationCommands: string[]): WorkflowProfile | undefined {
   if (!learnedSurface) {
     return undefined;
   }
@@ -1371,15 +1469,20 @@ function buildWorkflowProfile(commits: CommitMetadata[], learnedSurface: Learned
   const sourceActions = actions.filter((action) => action.group === "source");
   const testActions = actions.filter((action) => action.group === "test");
   const supportingArtifactActions = actions.filter((action) => action.group === "supporting");
-  const steps = workflowStepsForActions(actions, learnedSurface, validationCommands);
+  const { coreSteps, supportingSteps } = workflowStepsForActions(actions, learnedSurface, primaryValidationCommands);
+  const steps = [...coreSteps, ...supportingSteps];
 
   return {
     actions,
     sourceActions,
     testActions,
     supportingArtifactActions,
-    validationCommands,
+    validationCommands: unique([...primaryValidationCommands, ...secondaryValidationCommands]),
+    primaryValidationCommands,
+    secondaryValidationCommands,
     steps,
+    coreSteps,
+    supportingSteps,
     usesGenericFallback: steps.length === 0
   };
 }
@@ -1499,27 +1602,77 @@ function workflowActionPriority(action: WorkflowAction, kind: SurfaceTaskKind | 
   return priorities[action] ?? 99;
 }
 
-function workflowStepsForActions(actions: WorkflowActionSummary[], learnedSurface: LearnedSurfaceMatch, validationCommands: string[]): WorkflowStepEvidence[] {
-  const steps = actions
-    .map((action) => workflowStepForAction(action, learnedSurface))
+function workflowStepsForActions(actions: WorkflowActionSummary[], learnedSurface: LearnedSurfaceMatch, primaryValidationCommands: string[]): { coreSteps: WorkflowStepEvidence[]; supportingSteps: WorkflowStepEvidence[] } {
+  const coreSteps = actions
+    .filter((action) => isCoreWorkflowAction(action, learnedSurface))
+    .map((action) => workflowStepForAction(action, learnedSurface, "core"))
+    .filter((step): step is WorkflowStepEvidence => Boolean(step))
+    .slice(0, 5);
+  const coreActionKeys = new Set(coreSteps.map((step) => step.action));
+  const supportingSteps = actions
+    .filter((action) => !isCoreWorkflowAction(action, learnedSurface))
+    .filter((action) => !coreActionKeys.has(action.action))
+    .map((action) => workflowStepForAction(action, learnedSurface, "supporting"))
     .filter((step): step is WorkflowStepEvidence => Boolean(step))
     .slice(0, 5);
 
-  if (validationCommands.length > 0 && steps.length > 0) {
-    steps.push({
+  if (primaryValidationCommands.length > 0 && coreSteps.length > 0) {
+    coreSteps.push({
       action: "validation",
-      text: "Run the discovered validation command(s).",
-      count: validationCommands.length,
-      files: validationCommands
+      text: "Run the primary validation command(s).",
+      count: primaryValidationCommands.length,
+      files: primaryValidationCommands,
+      tier: "core"
     });
   }
 
-  return steps;
+  return { coreSteps, supportingSteps };
 }
 
-function workflowStepForAction(summary: WorkflowActionSummary, learnedSurface: LearnedSurfaceMatch): WorkflowStepEvidence | undefined {
+function isCoreWorkflowAction(summary: WorkflowActionSummary, learnedSurface: LearnedSurfaceMatch): boolean {
   const kind = learnedSurface.taskKind ?? "source-workflow";
-  const stepText = workflowStepText(summary.action, kind);
+  if (kind === "docs") {
+    return summary.action === "updated_docs";
+  }
+  if (kind === "config") {
+    return summary.action === "changed_config_key" || summary.action === "changed_package_script";
+  }
+  if (summary.group === "supporting") {
+    return false;
+  }
+
+  if (kind === "commands") {
+    return [
+      "added_cli_option",
+      "changed_cli_option",
+      "modified_function",
+      "added_function",
+      "changed_error_handling",
+      "changed_output_formatting",
+      "added_test_case"
+    ].includes(summary.action);
+  }
+
+  if (kind === "ui") {
+    return ["updated_component", "updated_api_client", "updated_style", "modified_function", "changed_error_handling", "changed_output_formatting", "added_test_case"].includes(summary.action);
+  }
+
+  if (kind === "api") {
+    return ["added_route_or_handler", "changed_schema_or_model", "updated_api_client", "changed_validation_logic", "changed_error_handling", "modified_function", "added_test_case"].includes(summary.action);
+  }
+
+  if (kind === "database") {
+    return ["changed_query_or_migration", "changed_schema_or_model", "added_test_case"].includes(summary.action);
+  }
+
+  return summary.group === "source" || summary.group === "test";
+}
+
+function workflowStepForAction(summary: WorkflowActionSummary, learnedSurface: LearnedSurfaceMatch, tier: "core" | "supporting"): WorkflowStepEvidence | undefined {
+  const kind = learnedSurface.taskKind ?? "source-workflow";
+  const stepText = tier === "core"
+    ? workflowStepText(summary.action, kind)
+    : supportingWorkflowStepText(summary.action, kind);
   if (!stepText) {
     return undefined;
   }
@@ -1528,8 +1681,31 @@ function workflowStepForAction(summary: WorkflowActionSummary, learnedSurface: L
     action: summary.action,
     text: stepText,
     count: summary.count,
-    files: summary.files.slice(0, 3)
+    files: summary.files.slice(0, 3),
+    tier
   };
+}
+
+function supportingWorkflowStepText(action: WorkflowAction, kind: SurfaceTaskKind): string | undefined {
+  if (action === "updated_docs") {
+    if (kind === "commands") {
+      return "Update docs/help text only if the command's user-facing behavior changes.";
+    }
+    return "Update documentation only if the user-facing behavior changes.";
+  }
+  if (action === "changed_config_key") {
+    return "Update configuration only if the source change requires it.";
+  }
+  if (action === "changed_package_script") {
+    return "Update package scripts only if validation or developer workflow changes.";
+  }
+  if (action === "updated_fixture") {
+    return "Update fixtures only when source behavior or output changes.";
+  }
+  if (action === "updated_style") {
+    return "Update styles only when the visible UI behavior changes.";
+  }
+  return undefined;
 }
 
 function workflowStepText(action: WorkflowAction, kind: SurfaceTaskKind): string | undefined {
@@ -2225,7 +2401,7 @@ function decidePromotion(
   const representativeFileCount = representativeSourceTestFiles(evidenceFiles, learnedSurface).length;
   const taskSupport = taskEvidenceSupport(taskArea, genericCategory, evidenceFiles, dominantSignals, validationCommands, learnedSurface);
   const hasWorkflow = workflowQuality >= DRAFT_WORKFLOW_QUALITY
-    && (workflowProfile ? workflowProfile.steps.length > 0 && !workflowProfile.usesGenericFallback : actionableWorkflowKind(genericCategory, taskArea, terms, learnedSurface) !== "unknown")
+    && (workflowProfile ? workflowProfile.coreSteps.length > 0 && !workflowProfile.usesGenericFallback : actionableWorkflowKind(genericCategory, taskArea, terms, learnedSurface) !== "unknown")
     && taskSupport.hasTaskSourceEvidence;
   const hasJunkName = hasObviousJunkName(proposedTaskName);
   const surfaceConfidence = learnedSurface?.confidence ?? 0;
@@ -2393,9 +2569,9 @@ function calculateWorkflowQuality(
     else if (repeatedActions.length >= 1) score += 0.1;
     if (workflowProfile.sourceActions.length > 0) score += 0.2;
     if (workflowProfile.testActions.length > 0) score += 0.2;
-    if (workflowProfile.validationCommands.length > 0 || validationCommands.length > 0) score += 0.15;
-    if (workflowProfile.steps.length >= 3 && !workflowProfile.usesGenericFallback) score += 0.15;
-    else if (workflowProfile.steps.length > 0 && !workflowProfile.usesGenericFallback) score += 0.08;
+    if (workflowProfile.primaryValidationCommands.length > 0 || validationCommands.length > 0) score += 0.15;
+    if (workflowProfile.coreSteps.length >= 3 && !workflowProfile.usesGenericFallback) score += 0.15;
+    else if (workflowProfile.coreSteps.length > 0 && !workflowProfile.usesGenericFallback) score += 0.08;
     if (commits.length >= 3) score += 0.05;
     if (workflowProfile.usesGenericFallback) score -= 0.2;
     if (generatedArtifactEvidenceShare(commits) > 0.35) score -= 0.15;

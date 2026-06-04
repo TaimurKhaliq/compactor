@@ -28,6 +28,7 @@ Compactor `0.2.0` adds skill lifecycle management so generated guidance can be r
 ```bash
 npx @taimurkhaliq/compactor analyze .
 npx @taimurkhaliq/compactor analyze https://github.com/org/repo.git
+npx @taimurkhaliq/compactor apply . --target codex
 ```
 
 You can also install or link it as a normal CLI package:
@@ -69,6 +70,65 @@ When the target is a remote Git URL, Compactor clones it into:
 ```
 
 If that workspace already exists, Compactor runs `git pull --ff-only` before analysis. Generated output is written inside the checked-out target repository's own `.compactor/` folder.
+
+### `compactor apply`
+
+Publishes generated Compactor guidance into agent entrypoint files that coding tools already look for.
+
+```bash
+compactor apply . --target codex
+compactor apply . --target claude
+compactor apply . --target cursor
+compactor apply . --target copilot
+compactor apply . --target all
+compactor apply . --target all --dry-run
+```
+
+Targets:
+
+- `codex` updates root `AGENTS.md`
+- `claude` updates root `CLAUDE.md`
+- `cursor` updates `.cursor/rules/compactor.mdc`
+- `copilot` updates `.github/copilot-instructions.md`
+- `all` applies every supported target
+
+`apply` only edits the managed section between:
+
+```html
+<!-- COMPACTOR:START -->
+<!-- COMPACTOR:END -->
+```
+
+Human-authored content outside those markers is preserved. Approved or agent-ready skills are listed as usable guidance, draft skills are listed separately as review-only context, and pattern candidates are linked as non-agent-ready evidence.
+
+### Human approval flow
+
+Compactor separates generated output into three trust levels:
+
+- `.compactor/skills` contains trusted, agent-ready or human-approved skills.
+- `.compactor/draft-skills` contains generated draft skills that need review.
+- `.compactor/patterns` contains noisy pattern candidates that are not skills.
+
+Use the review flow before wiring guidance into day-to-day agent behavior:
+
+```bash
+compactor review .
+compactor approve <draft-skill-id> .
+compactor reject <draft-skill-id> .
+compactor deprecate <approved-skill-id> .
+```
+
+`approve` moves a draft skill into `.compactor/skills`, records `approved_at` and `approved_by`, adds a human-approved banner to `SKILL.md`, regenerates `.compactor/AGENTS.md`, and refreshes any existing root integration files created by `compactor apply`.
+
+`reject` archives an unapproved draft under `.compactor/archive/rejected-skills/`. `deprecate` archives an approved skill under `.compactor/archive/deprecated-skills/` and removes it from active guidance.
+
+You can also turn a pattern candidate into a named draft, then approve it after editing:
+
+```bash
+compactor promote-pattern <pattern-id> --name "Update Reporting UI" .
+compactor rename-draft <draft-skill-id> --name "Update Reporting Dashboard UI" .
+compactor approve <draft-skill-id> .
+```
 
 ### `compactor explain`
 
@@ -183,11 +243,15 @@ Generated skills include `metadata.json` sidecars and a freshness banner. Use li
 ```bash
 compactor refresh
 compactor validate-skills
+compactor review
 compactor approve <skill-id>
+compactor reject <skill-id>
 compactor deprecate <skill-id>
+compactor promote-pattern <pattern-id> --name "Skill name"
+compactor rename-draft <skill-id> --name "Skill name"
 ```
 
-`refresh` re-sources existing skills from commits after the last generated HEAD, updates supporting evidence, and marks skills stale or drifting when patterns move. `validate-skills` reports fresh, stale, drifting, deprecated, and review-needed skills without changing skill files. `approve` marks a skill as human reviewed, while `deprecate` keeps the files but tells agents not to use the skill.
+`refresh` re-sources existing skills from commits after the last generated HEAD, updates supporting evidence, and marks skills stale or drifting when patterns move. `validate-skills` reports fresh, stale, drifting, deprecated, and review-needed skills without changing skill files. `review` prints a dashboard for drafts and patterns. `approve` moves a draft into trusted skills, `reject` archives an unapproved draft, and `deprecate` archives a trusted skill so agents no longer use it.
 
 ### `compactor report`
 

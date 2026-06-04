@@ -6,7 +6,7 @@ import {
   renderSkillBanner,
   writeSkillMetadata
 } from "./lifecycle.js";
-import type { CandidateSkill, GenerationResult, MiningResult, ScanResult, SkillMetadata } from "../types.js";
+import type { CandidateSkill, GenerationResult, MiningResult, ScanResult, SkillMetadata, WorkflowStepEvidence } from "../types.js";
 
 interface CleanupResult {
   preservedMetadata: SkillMetadata[];
@@ -249,6 +249,10 @@ export function renderAgentsMarkdown(scan: ScanResult, mining: MiningResult): st
 }
 
 function renderWhenToUse(candidate: CandidateSkill): string {
+  if (candidate.learnedSurface?.taskKind === "commands") {
+    return `Use this when adding or changing command behavior, flags, parsing, or command-specific error handling in \`${candidate.learnedSurface.commonDirectory}\`.`;
+  }
+
   if (candidate.taskDescription) {
     return toWhenToUse(candidate.taskDescription);
   }
@@ -284,9 +288,10 @@ function renderLearnedSurface(candidate: CandidateSkill): string[] {
     lines.push(...surface.coChangingTestFiles.slice(0, 5).map((file) => `  - ${file}`));
   }
 
-  if (surface.validationCommands.length > 0) {
+  const validationCommands = learnedSurfaceValidationCommands(candidate);
+  if (validationCommands.length > 0) {
     lines.push("- Validation:");
-    lines.push(...surface.validationCommands.map((command) => `  - ${command}`));
+    lines.push(...validationCommands.map((command) => `  - ${command}`));
   }
 
   if (surface.repeatedTerms.length > 0) {
@@ -298,6 +303,17 @@ function renderLearnedSurface(candidate: CandidateSkill): string[] {
   }
 
   return lines;
+}
+
+function learnedSurfaceValidationCommands(candidate: CandidateSkill): string[] {
+  if (candidate.workflowProfile) {
+    return unique([
+      ...candidate.workflowProfile.primaryValidationCommands,
+      ...candidate.workflowProfile.secondaryValidationCommands
+    ]);
+  }
+
+  return candidate.suggestedValidationCommands;
 }
 
 function toWhenToUse(taskDescription: string): string {
@@ -416,7 +432,13 @@ function unique(values: string[]): string[] {
 
 function renderWorkflow(candidate: CandidateSkill): string[] {
   if (candidate.workflowProfile && candidate.workflowProfile.steps.length > 0 && !candidate.workflowProfile.usesGenericFallback) {
-    return candidate.workflowProfile.steps.map((step, index) => `${index + 1}. ${step.text}${workflowEvidenceHint(step.count, step.files)}`);
+    return [
+      "### Core workflow",
+      ...renderWorkflowStepList(candidate.workflowProfile.coreSteps),
+      "",
+      "### Optional supporting updates",
+      ...renderSupportingWorkflowSteps(candidate.workflowProfile.supportingSteps)
+    ];
   }
 
   if (candidate.learnedSurface?.taskKind === "commands") {
@@ -462,6 +484,22 @@ function renderWorkflow(candidate: CandidateSkill): string[] {
   ];
 }
 
+function renderWorkflowStepList(steps: WorkflowStepEvidence[]): string[] {
+  if (!steps || steps.length === 0) {
+    return ["- No evidence-backed core workflow steps were inferred."];
+  }
+
+  return steps.map((step, index) => `${index + 1}. ${step.text}${workflowEvidenceHint(step.count, step.files)}`);
+}
+
+function renderSupportingWorkflowSteps(steps: WorkflowStepEvidence[]): string[] {
+  if (!steps || steps.length === 0) {
+    return ["- No repeated optional supporting updates were observed."];
+  }
+
+  return steps.map((step) => `- ${step.text}${workflowEvidenceHint(step.count, step.files)}`);
+}
+
 function workflowEvidenceHint(count: number, files: string[]): string {
   const parts = [
     count > 0 ? `Observed in ${count} ${count === 1 ? "commit" : "commits"}` : "",
@@ -472,6 +510,20 @@ function workflowEvidenceHint(count: number, files: string[]): string {
 }
 
 function renderValidation(candidate: CandidateSkill): string[] {
+  if (candidate.workflowProfile && (candidate.workflowProfile.primaryValidationCommands.length > 0 || candidate.workflowProfile.secondaryValidationCommands.length > 0)) {
+    const lines: string[] = [];
+    if (candidate.workflowProfile.primaryValidationCommands.length > 0) {
+      lines.push("Primary validation:");
+      lines.push(...candidate.workflowProfile.primaryValidationCommands.map((command) => `- ${command}`));
+    }
+    if (candidate.workflowProfile.secondaryValidationCommands.length > 0) {
+      if (lines.length > 0) lines.push("");
+      lines.push("Secondary validation:");
+      lines.push(...candidate.workflowProfile.secondaryValidationCommands.map((command) => `- ${command}`));
+    }
+    return lines;
+  }
+
   if (candidate.suggestedValidationCommands.length === 0) {
     return ["- No confident validation command discovered."];
   }

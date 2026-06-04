@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { classifyCommit, collectRepeatedPathPatterns } from "../src/analysis/classifier.js";
-import { approveSkill, deprecateSkill, readSkillMetadata, refreshSkills, renderAgentsMarkdownFromMetadata, validateSkills } from "../src/skills/lifecycle.js";
+import {
+  approveSkill,
+  deprecateSkill,
+  promotePatternToDraft,
+  readDraftSkillMetadata,
+  readSkillMetadata,
+  refreshSkills,
+  rejectDraftSkill,
+  renameDraftSkill,
+  renderAgentsMarkdownFromMetadata,
+  reviewSkills,
+  validateSkills
+} from "../src/skills/lifecycle.js";
 import { generateSkillDrafts } from "../src/skills/skillGenerator.js";
 import type { CandidateSkill, DiffSignal, MiningResult, ScanResult } from "../src/types.js";
 import { diffSummaryWithSignals, emptyDiffSummary } from "./helpers.js";
@@ -131,12 +143,16 @@ test("approve and deprecate update metadata and AGENTS excludes deprecated skill
     const base = baseScan(repoRoot);
     generateSkillDrafts(base, mining(repoRoot));
 
-    const approved = approveSkill(repoRoot, "build-project-grid", "2026-01-05T00:00:00Z");
+    const approved = approveSkill(repoRoot, "build-project-grid", "2026-01-05T00:00:00Z", "reviewer");
     assert.equal(approved.human_approved, true);
     assert.equal(approved.approved_at, "2026-01-05T00:00:00Z");
+    assert.equal(approved.approved_by, "reviewer");
 
-    const deprecated = deprecateSkill(repoRoot, "build-project-grid", "2026-01-06T00:00:00Z");
+    const deprecated = deprecateSkill(repoRoot, "build-project-grid", "2026-01-06T00:00:00Z", "reviewer");
     assert.equal(deprecated.status, "deprecated");
+    assert.equal(deprecated.deprecated_by, "reviewer");
+    assert.equal(existsSync(join(repoRoot, ".compactor", "skills", "build-project-grid")), false);
+    assert.equal(existsSync(join(repoRoot, ".compactor", "archive", "deprecated-skills", "build-project-grid", "SKILL.md")), true);
 
     const agents = renderAgentsMarkdownFromMetadata(base, readSkillMetadata(repoRoot));
     assert.match(agents, /No agent-ready skills were generated/);
@@ -168,17 +184,138 @@ test("approve promotes a draft skill into trusted skills", () => {
 
     assert.equal(existsSync(join(repoRoot, ".compactor", "draft-skills", "draft-project-grid", "SKILL.md")), true);
 
-    const approved = approveSkill(repoRoot, "draft-project-grid", "2026-01-05T00:00:00Z");
+    const approved = approveSkill(repoRoot, "draft-project-grid", "2026-01-05T00:00:00Z", "reviewer");
 
     assert.equal(approved.human_approved, true);
     assert.equal(approved.status, "fresh");
     assert.equal(approved.promotion_level, "agent_ready");
+    assert.equal(approved.approved_by, "reviewer");
     assert.equal(existsSync(join(repoRoot, ".compactor", "draft-skills", "draft-project-grid", "SKILL.md")), false);
     assert.equal(existsSync(join(repoRoot, ".compactor", "skills", "draft-project-grid", "SKILL.md")), true);
 
     const markdown = readFileSync(join(repoRoot, ".compactor", "skills", "draft-project-grid", "SKILL.md"), "utf8");
-    assert.match(markdown, /^Status: fresh/);
+    assert.match(markdown, /^Status: human-approved/);
+    assert.match(markdown, /Approved at: 2026-01-05T00:00:00Z/);
+    assert.match(markdown, /Approved by: reviewer/);
     assert.match(markdown, /Human approved: true/);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("review lists draft skills with review details", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-lifecycle-"));
+
+  try {
+    const base = baseScan(repoRoot);
+    generateSkillDrafts(base, {
+      repoRoot,
+      generatedAt: "2026-01-01T00:00:00Z",
+      commitsAnalyzed: 1,
+      candidates: [draftCandidate()]
+    });
+
+    const report = reviewSkills(repoRoot);
+
+    assert.equal(report.draftSkills.length, 1);
+    assert.equal(report.draftSkills[0]?.skill_id, "draft-project-grid");
+    assert.equal(report.draftSkills[0]?.name, "Add or Update Project Grid Draft");
+    assert.ok(report.draftSkills[0]?.confidence);
+    assert.match(report.draftSkills[0]?.skill_path ?? "", /\.compactor\/draft-skills\/draft-project-grid\/SKILL\.md$/);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("reject archives a draft skill", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-lifecycle-"));
+
+  try {
+    generateSkillDrafts(baseScan(repoRoot), {
+      repoRoot,
+      generatedAt: "2026-01-01T00:00:00Z",
+      commitsAnalyzed: 1,
+      candidates: [draftCandidate()]
+    });
+
+    const rejected = rejectDraftSkill(repoRoot, "draft-project-grid", "2026-01-07T00:00:00Z", "reviewer");
+
+    assert.equal(rejected.status, "rejected");
+    assert.equal(rejected.rejected_at, "2026-01-07T00:00:00Z");
+    assert.equal(rejected.rejected_by, "reviewer");
+    assert.equal(existsSync(join(repoRoot, ".compactor", "draft-skills", "draft-project-grid")), false);
+    assert.equal(existsSync(join(repoRoot, ".compactor", "archive", "rejected-skills", "draft-project-grid", "SKILL.md")), true);
+    assert.equal(readDraftSkillMetadata(repoRoot).length, 0);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("deprecate archives an approved skill", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-lifecycle-"));
+
+  try {
+    generateSkillDrafts(baseScan(repoRoot), mining(repoRoot));
+    approveSkill(repoRoot, "build-project-grid", "2026-01-05T00:00:00Z", "reviewer");
+
+    const deprecated = deprecateSkill(repoRoot, "build-project-grid", "2026-01-08T00:00:00Z", "reviewer");
+    const archivedMetadata = JSON.parse(readFileSync(join(repoRoot, ".compactor", "archive", "deprecated-skills", "build-project-grid", "metadata.json"), "utf8")) as Record<string, unknown>;
+
+    assert.equal(deprecated.status, "deprecated");
+    assert.equal(deprecated.deprecated_at, "2026-01-08T00:00:00Z");
+    assert.equal(deprecated.deprecated_by, "reviewer");
+    assert.equal(archivedMetadata.status, "deprecated");
+    assert.equal(existsSync(join(repoRoot, ".compactor", "skills", "build-project-grid")), false);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("promote-pattern creates a draft skill", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-lifecycle-"));
+
+  try {
+    const patternDir = join(repoRoot, ".compactor", "patterns", "mixed-ui-test");
+    mkdirSync(patternDir, { recursive: true });
+    writeFileSync(join(patternDir, "PATTERN.md"), "# Pattern Candidate: Mixed UI/Test\n\nThis is not a skill.\n", "utf8");
+
+    const metadata = promotePatternToDraft(repoRoot, "mixed-ui-test", "Review Mixed UI Test Workflow", "2026-01-09T00:00:00Z");
+    const markdown = readFileSync(join(repoRoot, ".compactor", "draft-skills", metadata.skill_id, "SKILL.md"), "utf8");
+
+    assert.equal(metadata.status, "draft");
+    assert.equal(metadata.promotion_level, "draft");
+    assert.equal(metadata.promoted_from_pattern, "mixed-ui-test");
+    assert.equal(metadata.human_named, true);
+    assert.equal(metadata.proposed_name, "Review Mixed UI Test Workflow");
+    assert.match(markdown, /^Status: draft/);
+    assert.match(markdown, /^# Review Mixed UI Test Workflow/m);
+    assert.equal(existsSync(join(repoRoot, ".compactor", "patterns", "mixed-ui-test")), false);
+    assert.equal(existsSync(join(repoRoot, ".compactor", "archive", "promoted-patterns", "mixed-ui-test", "PATTERN.md")), true);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("rename-draft updates metadata and title", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-lifecycle-"));
+
+  try {
+    generateSkillDrafts(baseScan(repoRoot), {
+      repoRoot,
+      generatedAt: "2026-01-01T00:00:00Z",
+      commitsAnalyzed: 1,
+      candidates: [draftCandidate()]
+    });
+
+    const renamed = renameDraftSkill(repoRoot, "draft-project-grid", "Reviewed Grid Workflow", "2026-01-10T00:00:00Z", "reviewer");
+    const markdown = readFileSync(join(repoRoot, ".compactor", "draft-skills", "reviewed-grid-workflow", "SKILL.md"), "utf8");
+
+    assert.equal(renamed.skill_id, "reviewed-grid-workflow");
+    assert.equal(renamed.name, "Reviewed Grid Workflow");
+    assert.equal(renamed.human_edited, true);
+    assert.equal(renamed.renamed_by, "reviewer");
+    assert.equal(existsSync(join(repoRoot, ".compactor", "draft-skills", "draft-project-grid")), false);
+    assert.match(markdown, /^# Reviewed Grid Workflow/m);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -269,6 +406,17 @@ function candidate(): CandidateSkill {
     confidenceFactors: ["1 of 1 scanned commits matched this repeated change shape."],
     falsePositiveNotes: ["Review representative commits."],
     rationale: "Multiple commits repeat grid work."
+  };
+}
+
+function draftCandidate(): CandidateSkill {
+  return {
+    ...candidate(),
+    id: "draft-project-grid",
+    name: "Add or Update Project Grid Draft",
+    promotion_level: "draft",
+    workflowQuality: 0.65,
+    promotionReasons: ["Pattern confidence is below agent-ready threshold."]
   };
 }
 
