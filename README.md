@@ -12,6 +12,17 @@ git history -> bounded diff summaries -> repeated patterns -> candidate skills -
 
 AI coding agents often spend tokens rediscovering the same project conventions: how API changes are tested, where UI components live, how migrations pair with models, how CI/config changes are validated, and which commands matter. Compactor extracts those repeated patterns from commits and drafts compact guidance that can be reviewed and reused with Codex, Copilot-style agents, or repository `AGENTS.md` files.
 
+## What's New in 0.2.0
+
+Compactor `0.2.0` adds skill lifecycle management so generated guidance can be refreshed, validated, approved, or deprecated as the repository evolves.
+
+- Generated skills now include `metadata.json` sidecars with evidence commits, pattern signatures, confidence scores, validation commands, and freshness status.
+- `SKILL.md` files include a freshness banner with status, generated HEAD, last refresh time, and evidence count.
+- `compactor refresh` re-sources existing skills from newer commits and marks skills fresh, stale, or drifting.
+- `compactor validate-skills` reports stale, drifting, deprecated, and review-needed skills.
+- `compactor approve <skill-id>` records human approval.
+- `compactor deprecate <skill-id>` keeps a skill on disk but removes it from active agent guidance.
+
 ## Installation / Usage
 
 ```bash
@@ -220,6 +231,7 @@ src/analysis/classifier.ts
 src/analysis/detectors/
 src/analysis/patternMiner.ts
 src/skills/skillGenerator.ts
+src/skills/lifecycle.ts
 src/report/reportGenerator.ts
 src/types.ts
 ```
