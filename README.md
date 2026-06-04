@@ -12,23 +12,26 @@ git history -> bounded diff summaries -> repeated patterns -> candidate skills -
 
 AI coding agents often spend tokens rediscovering the same project conventions: how API changes are tested, where UI components live, how migrations pair with models, how CI/config changes are validated, and which commands matter. Compactor extracts those repeated patterns from commits and drafts compact guidance that can be reviewed and reused with Codex, Copilot-style agents, or repository `AGENTS.md` files.
 
-## Install
+## Installation / Usage
+
+```bash
+npx @taimurkhaliq/compactor analyze .
+npx @taimurkhaliq/compactor analyze https://github.com/org/repo.git
+```
+
+You can also install or link it as a normal CLI package:
+
+```bash
+npm install -g @taimurkhaliq/compactor
+compactor analyze .
+```
+
+For local development from this repository:
 
 ```bash
 npm install
 npm run build
-```
-
-Run locally:
-
-```bash
-npm run compactor -- report
-```
-
-After publishing or linking, the binary name is:
-
-```bash
-compactor report
+npm run compactor -- analyze .
 ```
 
 ## Commands
@@ -161,6 +164,19 @@ Each generated skill includes:
 - possible false-positive notes
 
 Validation commands are generated only when Compactor can discover them from the target repository, including package scripts, Makefile targets, Maven/Gradle files, Python test hints, Go/.NET/Rust project files, and simple CI workflow commands.
+
+### Skill lifecycle
+
+Generated skills include `metadata.json` sidecars and a freshness banner. Use lifecycle commands to keep generated guidance from going stale:
+
+```bash
+compactor refresh
+compactor validate-skills
+compactor approve <skill-id>
+compactor deprecate <skill-id>
+```
+
+`refresh` re-sources existing skills from commits after the last generated HEAD, updates supporting evidence, and marks skills stale or drifting when patterns move. `validate-skills` reports fresh, stale, drifting, deprecated, and review-needed skills without changing skill files. `approve` marks a skill as human reviewed, while `deprecate` keeps the files but tells agents not to use the skill.
 
 ### `compactor report`
 

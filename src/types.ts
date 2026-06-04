@@ -165,6 +165,60 @@ export interface CandidateSkill {
   rationale: string;
 }
 
+export type SkillStatus = "fresh" | "stale" | "drifting" | "deprecated";
+
+export interface SkillPatternSignature {
+  hash: string;
+  generic_signals: string[];
+  common_directories: string[];
+  repeated_file_terms: string[];
+  dominant_domain_terms: string[];
+  validation_commands: string[];
+}
+
+export interface SkillMetadata {
+  skill_id: string;
+  name: string;
+  created_at: string;
+  generated_from_head: string;
+  evidence_commits: EvidenceCommit[];
+  pattern_signature: SkillPatternSignature;
+  generic_signals: string[];
+  dominant_terms: string[];
+  validation_commands: string[];
+  pattern_confidence: number;
+  naming_confidence: number;
+  status: SkillStatus;
+  last_refreshed_at: string;
+  human_approved?: boolean;
+  approved_at?: string;
+  validation_warnings?: string[];
+  drift_reasons?: string[];
+}
+
+export interface SkillValidationSummary {
+  skill_id: string;
+  name: string;
+  status: SkillStatus;
+  human_approved: boolean;
+  supporting_commits: EvidenceCommit[];
+  drift_reasons: string[];
+  validation_warnings: string[];
+  suggested_human_review: boolean;
+}
+
+export interface SkillLifecycleReport {
+  repoRoot: string;
+  generatedAt: string;
+  currentHead: string;
+  fresh: SkillValidationSummary[];
+  stale: SkillValidationSummary[];
+  drifting: SkillValidationSummary[];
+  deprecated: SkillValidationSummary[];
+  validationCommandChanges: SkillValidationSummary[];
+  suggestedHumanReview: SkillValidationSummary[];
+}
+
 export interface MiningResult {
   repoRoot: string;
   generatedAt: string;
@@ -175,6 +229,7 @@ export interface MiningResult {
 export interface GeneratedSkillFile {
   skillId: string;
   path: string;
+  metadataPath?: string;
 }
 
 export interface GenerationResult {

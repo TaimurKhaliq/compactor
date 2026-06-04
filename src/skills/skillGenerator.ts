@@ -1,36 +1,48 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  createSkillMetadata,
+  renderAgentsMarkdownFromMetadata,
+  renderSkillBanner,
+  writeSkillMetadata
+} from "./lifecycle.js";
 import type { CandidateSkill, GenerationResult, MiningResult, ScanResult } from "../types.js";
 
 export function generateSkillDrafts(scan: ScanResult, mining: MiningResult): GenerationResult {
   const compactorDir = join(scan.repoRoot, ".compactor");
   const skillsDir = join(compactorDir, "skills");
   mkdirSync(skillsDir, { recursive: true });
+  const now = new Date().toISOString();
 
   const skillFiles = mining.candidates.map((candidate) => {
     const skillDir = join(skillsDir, candidate.id);
     mkdirSync(skillDir, { recursive: true });
+    const metadata = createSkillMetadata(scan, candidate, now);
     const skillPath = join(skillDir, "SKILL.md");
-    writeFileSync(skillPath, renderSkillMarkdown(candidate), "utf8");
+    writeFileSync(skillPath, renderSkillMarkdown(candidate, metadata), "utf8");
+    const metadataPath = writeSkillMetadata(skillDir, metadata);
     return {
       skillId: candidate.id,
-      path: skillPath
+      path: skillPath,
+      metadataPath
     };
   });
 
   const agentsPath = join(compactorDir, "AGENTS.md");
-  writeFileSync(agentsPath, renderAgentsMarkdown(scan, mining), "utf8");
+  writeFileSync(agentsPath, renderAgentsMarkdownFromMetadata(scan, mining.candidates.map((candidate) => createSkillMetadata(scan, candidate, now))), "utf8");
 
   return {
     repoRoot: scan.repoRoot,
-    generatedAt: new Date().toISOString(),
+    generatedAt: now,
     agentsPath,
     skillFiles
   };
 }
 
-export function renderSkillMarkdown(candidate: CandidateSkill): string {
+export function renderSkillMarkdown(candidate: CandidateSkill, metadata = createSkillMetadataForRender(candidate)): string {
   return [
+    renderSkillBanner(metadata).trimEnd(),
+    "",
     `# ${candidate.name}`,
     "",
     `Proposed skill name: ${candidate.name}`,
@@ -76,6 +88,21 @@ export function renderSkillMarkdown(candidate: CandidateSkill): string {
     ...renderList(candidate.falsePositiveNotes),
     ""
   ].join("\n");
+}
+
+function createSkillMetadataForRender(candidate: CandidateSkill) {
+  return createSkillMetadata(
+    {
+      repoRoot: "",
+      packageScripts: [],
+      validationCommands: candidate.suggestedValidationCommands,
+      generatedAt: new Date().toISOString(),
+      commitsAnalyzed: candidate.evidenceCommits.length,
+      commits: [],
+      repeatedPathPatterns: []
+    },
+    candidate
+  );
 }
 
 export function renderAgentsMarkdown(scan: ScanResult, mining: MiningResult): string {

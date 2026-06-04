@@ -6,6 +6,15 @@ import { scanRepository } from "./git/history.js";
 import { generateSkillExplanation } from "./report/explainGenerator.js";
 import { generateReport } from "./report/reportGenerator.js";
 import { generateSkillDrafts } from "./skills/skillGenerator.js";
+import {
+  approveSkill,
+  deprecateSkill,
+  readSkillMetadata,
+  refreshSkills,
+  renderAgentsMarkdownFromMetadata,
+  renderLifecycleReport,
+  validateSkills
+} from "./skills/lifecycle.js";
 import type { MiningResult, ScanResult } from "./types.js";
 
 interface CliOptions {
@@ -35,6 +44,20 @@ function main(): void {
     return;
   }
 
+  if (command === "approve" || command === "deprecate") {
+    const { skillId, options } = parseSkillActionArgs(args, command);
+    if (options.help) {
+      printHelp();
+      return;
+    }
+    if (command === "approve") {
+      runApprove(skillId, options);
+      return;
+    }
+    runDeprecate(skillId, options);
+    return;
+  }
+
   const options = parseOptions(args);
   if (options.help) {
     printHelp();
@@ -56,6 +79,12 @@ function main(): void {
       return;
     case "analyze":
       runAnalyze(options);
+      return;
+    case "refresh":
+      runRefresh(options);
+      return;
+    case "validate-skills":
+      runValidateSkills(options);
       return;
     default:
       throw new Error(`Unknown command: ${command}`);
@@ -156,6 +185,60 @@ function runExplain(skillId: string, options: CliOptions): void {
   const scan = scanAndCache(options);
   const mining = mineAndCache(scan);
   console.log(generateSkillExplanation(skillId, mining));
+}
+
+function runRefresh(options: CliOptions): void {
+  const scan = scanAndCache(options);
+  const report = refreshSkills(scan);
+  const output = renderLifecycleReport(report);
+  writeCache(scan.repoRoot, "skill-refresh-report.json", report);
+
+  if (options.json) {
+    printJson(report);
+    return;
+  }
+
+  console.log(output);
+}
+
+function runValidateSkills(options: CliOptions): void {
+  const scan = scanAndCache(options);
+  const report = validateSkills(scan);
+  const output = renderLifecycleReport(report);
+  writeCache(scan.repoRoot, "skill-validation-report.json", report);
+
+  if (options.json) {
+    printJson(report);
+    return;
+  }
+
+  console.log(output);
+}
+
+function runApprove(skillId: string, options: CliOptions): void {
+  const scan = scanAndCache(options);
+  const metadata = approveSkill(scan.repoRoot, skillId);
+  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, readSkillMetadata(scan.repoRoot)), "utf8");
+
+  if (options.json) {
+    printJson(metadata);
+    return;
+  }
+
+  console.log(`Approved skill: ${metadata.name}`);
+}
+
+function runDeprecate(skillId: string, options: CliOptions): void {
+  const scan = scanAndCache(options);
+  const metadata = deprecateSkill(scan.repoRoot, skillId);
+  writeFileSync(join(scan.repoRoot, ".compactor", "AGENTS.md"), renderAgentsMarkdownFromMetadata(scan, readSkillMetadata(scan.repoRoot)), "utf8");
+
+  if (options.json) {
+    printJson(metadata);
+    return;
+  }
+
+  console.log(`Deprecated skill: ${metadata.name}`);
 }
 
 function scanAndCache(options: CliOptions): ScanResult {
@@ -284,6 +367,51 @@ function parseExplainArgs(args: string[]): { skillId: string; options: CliOption
   };
 }
 
+function parseSkillActionArgs(args: string[], command: string): { skillId: string; options: CliOptions } {
+  let skillId: string | undefined;
+  const optionArgs: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      optionArgs.push(arg);
+      continue;
+    }
+
+    if ((arg === "--repo" || arg === "--limit" || arg === "-n") && args[index + 1]) {
+      optionArgs.push(arg, args[index + 1] as string);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      optionArgs.push(arg);
+      continue;
+    }
+
+    if (!skillId) {
+      skillId = arg;
+      continue;
+    }
+
+    optionArgs.push(arg);
+  }
+
+  const options = parseOptions(optionArgs);
+  if (!skillId && !options.help) {
+    throw new Error(`${command} requires a skill id`);
+  }
+
+  return {
+    skillId: skillId ?? "",
+    options
+  };
+}
+
 function parseLimit(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
@@ -317,6 +445,10 @@ Usage:
   compactor mine [--limit 50] [--repo path] [--json]
   compactor generate [--limit 50] [--repo path] [--json]
   compactor report [--limit 50] [--repo path]
+  compactor refresh [repo-url-or-path] [--limit 50] [--json]
+  compactor validate-skills [repo-url-or-path] [--limit 50] [--json]
+  compactor approve <skill-id> [repo-url-or-path]
+  compactor deprecate <skill-id> [repo-url-or-path]
 
 Commands:
   analyze   Run scan, mine, generate, and report in one shot
@@ -325,6 +457,11 @@ Commands:
   mine      Detect repeated development patterns and cache skill candidates
   generate  Generate .compactor/skills/*/SKILL.md and .compactor/AGENTS.md
   report    Print a concise terminal report
+  refresh   Re-source existing generated skills from newer commits
+  validate-skills
+            Report stale, drifting, deprecated, and review-needed skills
+  approve   Mark a generated skill as human approved
+  deprecate Mark a generated skill as deprecated
 `);
 }
 

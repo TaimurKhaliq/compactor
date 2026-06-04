@@ -1,22 +1,51 @@
 {
-  "name": "compactor",
+  "name": "@taimurkhaliq/compactor",
   "version": "0.1.0",
-  "description": "Mine git history for repeated AI coding-agent guidance and generate reusable skill drafts.",
+  "description": "Mine Git history into reusable AI coding skills.",
   "type": "module",
+  "license": "MIT",
+  "author": "Taimur Khaliq",
+  "repository": "git+https://github.com/TaimurKhaliq/compactor.git",
+  "homepage": "https://github.com/TaimurKhaliq/compactor#readme",
+  "bugs": {
+    "url": "https://github.com/TaimurKhaliq/compactor/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "codex",
+    "copilot",
+    "cli",
+    "git",
+    "developer-tools",
+    "skills",
+    "automation"
+  ],
   "bin": {
     "compactor": "dist/src/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc",
     "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build && npm test",
+    "prepublishOnly": "npm run clean && npm run build && npm test",
     "start": "node dist/src/cli.js",
     "compactor": "node dist/src/cli.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
-    "@types/node": "^20.19.41",
+    "@types/node": "^18.19.130",
     "typescript": "^5.5.3"
   }
 }

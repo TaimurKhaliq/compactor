@@ -61,9 +61,13 @@ test("generates skill files and AGENTS draft", () => {
     assert.equal(result.skillFiles.length, 1);
 
     const skill = readFileSync(join(repoRoot, ".compactor", "skills", "build-project-grid", "SKILL.md"), "utf8");
+    const metadata = readFileSync(join(repoRoot, ".compactor", "skills", "build-project-grid", "metadata.json"), "utf8");
     const agents = readFileSync(join(repoRoot, ".compactor", "AGENTS.md"), "utf8");
 
+    assert.match(skill, /^Status: fresh/);
     assert.match(skill, /# Build Project Grid/);
+    assert.match(metadata, /"skill_id": "build-project-grid"/);
+    assert.match(metadata, /"status": "fresh"/);
     assert.match(agents, /Compactor Draft Repo Guidance/);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
