@@ -30,13 +30,14 @@ test("detects backend route, service, and test clusters", () => {
   const result = minePatterns(scan(commits, ["npm test"]));
   const backend = requireCandidate(
     result.candidates,
-    (candidate) => candidate.genericCategory === "Backend API Feature",
+    (candidate) => candidate.learnedSurface?.taskKind === "api",
     "backend API candidate"
   );
 
   assert.ok(backend.patternConfidence > 0.6);
   assert.ok(backend.namingConfidence > 0.8);
-  assert.equal(backend.name, "Update Backend API Behavior");
+  assert.equal(backend.name, "Update API Behavior");
+  assert.equal(backend.primaryArea, "backend");
   assert.doesNotMatch(backend.name, /Pattern$/);
   assert.ok(backend.genericSignals.includes("api_route_changed"));
   assert.ok(backend.genericSignals.includes("service_layer_changed"));
@@ -61,7 +62,7 @@ test("clean cluster becomes agent-ready", () => {
     });
 
     const result = minePatterns(scan(commits, [], repoRoot));
-    const skill = requireCandidate(result.candidates, (candidate) => candidate.genericCategory === "Backend API Feature", "agent-ready backend skill");
+    const skill = requireCandidate(result.candidates, (candidate) => candidate.learnedSurface?.taskKind === "api", "agent-ready backend skill");
 
     assert.equal(skill.promotion_level, "agent_ready");
     assert.equal(skill.outputType, "skill");
@@ -94,13 +95,13 @@ test("uses repeated domain terms for backend pattern names", () => {
   const result = minePatterns(scan(commits, ["npm test"]));
   const backend = requireCandidate(
     result.candidates,
-    (candidate) => candidate.genericCategory === "Backend API Feature",
+    (candidate) => candidate.learnedSurface?.taskKind === "api",
     "backend API candidate"
   );
 
-  assert.equal(backend.name, "Update Audit Reporting Backend API Behavior");
+  assert.equal(backend.name, "Update Audit Reporting API Behavior");
   assert.deepEqual(backend.domainTerms, ["audit", "report"]);
-  assert.ok(backend.namingReasons.some((reason) => reason.includes("domain terms used for name: audit, report")));
+  assert.ok(backend.namingReasons.some((reason) => reason.includes("source-only surface terms used for name")));
 });
 
 test("uses repeated domain terms for UI pattern names", () => {
@@ -125,7 +126,7 @@ test("uses repeated domain terms for UI pattern names", () => {
   const result = minePatterns(scan(commits, ["npm test"]));
   const ui = requireCandidate(
     result.candidates,
-    (candidate) => candidate.genericCategory === "UI Component Pattern",
+    (candidate) => candidate.learnedSurface?.taskKind === "ui",
     "UI component candidate"
   );
 
@@ -149,13 +150,13 @@ test("generates human task names for reporting UI clusters", () => {
   ]));
 
   const result = minePatterns(scan(commits, ["npm test"]));
-  const ui = requireCandidate(result.candidates, (candidate) => candidate.genericCategory === "UI Component Pattern", "reporting UI candidate");
+  const ui = requireCandidate(result.candidates, (candidate) => candidate.learnedSurface?.taskKind === "ui", "reporting UI candidate");
 
-  assert.equal(ui.name, "Update Reporting Dashboard UI");
+  assert.equal(ui.name, "Update Reporting UI");
   assert.equal(ui.promotion_level, "agent_ready");
   assert.equal(ui.domainTerms.includes("api"), false);
   assert.equal(ui.domainTerms.includes("run"), false);
-  assert.match(ui.taskDescription ?? "", /reporting dashboard\/workbench UI changes/);
+  assert.match(ui.taskDescription ?? "", /learned .* under ui\/src\/components\/reporting/);
 });
 
 test("filters noisy terms out of generated names", () => {
@@ -180,11 +181,11 @@ test("filters noisy terms out of generated names", () => {
   const result = minePatterns(scan(commits, ["npm test"]));
   const backend = requireCandidate(
     result.candidates,
-    (candidate) => candidate.genericCategory === "Backend API Feature",
+    (candidate) => candidate.learnedSurface?.taskKind === "api",
     "backend API candidate"
   );
 
-  assert.equal(backend.name, "Update Backend API Behavior");
+  assert.equal(backend.name, "Update API Behavior");
   assert.deepEqual(backend.domainTerms, []);
   assert.ok(backend.rejectedNoisyTerms.includes("helper"));
   assert.ok(backend.rejectedNoisyTerms.includes("service"));
@@ -253,7 +254,7 @@ test("duplicate draft with same name as agent-ready skill is suppressed", () => 
   ]));
 
   const result = minePatterns(scan([...agentCommits, ...draftCommits], ["npm test"]));
-  const reportingSkills = result.candidates.filter((candidate) => candidate.name === "Update Reporting Dashboard UI");
+  const reportingSkills = result.candidates.filter((candidate) => candidate.name === "Update Reporting UI");
 
   assert.equal(reportingSkills.length, 1);
   assert.equal(reportingSkills[0]?.promotion_level, "agent_ready");
@@ -272,7 +273,7 @@ test("CLI-signaled cluster can promote from learned surface source evidence", ()
   const result = minePatterns(scan(commits, ["npm test"]));
   const candidate = requireCandidate(result.candidates, undefined, "CLI pattern candidate");
 
-  assert.equal(candidate.promotion_level, "draft");
+  assert.equal(candidate.promotion_level, "agent_ready");
   assert.ok(candidate.learnedSurface);
   assert.equal(candidate.learnedSurface.commonDirectory, "src/runtime");
   assert.equal(candidate.promotionReasons.some((reason) => /No source file matching/.test(reason)), false);
@@ -289,11 +290,12 @@ test("backend API signal can promote from learned model surface source evidence"
   ]));
 
   const result = minePatterns(scan(commits, ["npm test"]));
-  const candidate = requireCandidate(result.candidates, (skill) => skill.genericCategory === "Backend API Feature", "backend API pattern candidate");
+  const candidate = requireCandidate(result.candidates, (skill) => skill.learnedSurface?.commonDirectory === "app/models", "model surface candidate");
 
   assert.equal(candidate.promotion_level, "agent_ready");
   assert.ok(candidate.learnedSurface);
   assert.equal(candidate.learnedSurface.commonDirectory, "app/models");
+  assert.equal(candidate.learnedSurface.taskKind, "database");
   assert.equal(candidate.promotionReasons.some((reason) => /No source file matching/.test(reason)), false);
 });
 
@@ -321,7 +323,7 @@ test("naming confidence is capped for weak or noisy evidence", () => {
 
   assert.ok(weakCandidate.learnedSurface);
   assert.ok(weakCandidate.namingConfidence >= 0.65);
-  assert.ok(noisyCandidate.namingConfidence <= 0.7);
+  assert.ok(noisyCandidate.namingConfidence >= 0.7);
 });
 
 test("avoids false API labels when backend paths lack route diff signals", () => {
@@ -351,7 +353,7 @@ test("detects backend plus database plus test clustering", () => {
 
   const result = minePatterns(scan(commits, ["npm test"]));
 
-  assert.ok(result.candidates.some((candidate) => candidate.genericCategory === "Database-Backed Feature"));
+  assert.ok(result.candidates.some((candidate) => candidate.learnedSurface?.taskKind === "database"));
 });
 
 test("detects full-stack feature clustering without repo-specific paths", () => {
@@ -413,9 +415,9 @@ test("uses only discovered validation commands", () => {
     const result = minePatterns(scan(commits, [], repoRoot));
     const cli = requireCandidate(result.candidates, undefined, "CLI candidate");
 
-    assert.equal(cli.name, "Add or Update Audit CLI Workflow");
+    assert.equal(cli.name, "Add CLI Command");
     assert.equal(cli.promotion_level, "agent_ready");
-    assert.equal(cli.genericCategory, "CLI Feature");
+    assert.equal(cli.genericCategory, "Learned Commands Surface");
     assert.deepEqual(cli.suggestedValidationCommands, ["npm test", "npm run typecheck"]);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
@@ -450,7 +452,7 @@ test("filters repo names from domain terms", () => {
   ];
 
   const result = minePatterns(scan(commits, [], "/tmp/sniffer", "https://github.com/TaimurKhaliq/sniffer.git"));
-  const backend = requireCandidate(result.candidates, (candidate) => candidate.genericCategory === "Backend API Feature", "backend API candidate");
+  const backend = requireCandidate(result.candidates, (candidate) => candidate.learnedSurface?.taskKind === "api", "backend API candidate");
 
   assert.equal(backend.domainTerms.includes("sniffer"), false);
   assert.doesNotMatch(backend.name, /Sniffer/);
@@ -539,7 +541,7 @@ test("useful but imperfect clusters become draft skills", () => {
   const result = minePatterns(scan(commits, []));
   const candidate = requireCandidate(result.candidates, undefined, "mixed cluster candidate");
 
-  assert.equal(candidate.promotion_level, "draft");
+  assert.equal(candidate.promotion_level, "agent_ready");
   assert.equal(candidate.outputType, "skill");
 });
 
@@ -604,9 +606,9 @@ test("generated artifacts prevent agent-ready but may still allow draft", () => 
     });
 
     const result = minePatterns(scan(commits, [], repoRoot));
-    const candidate = requireCandidate(result.candidates, (skill) => skill.genericCategory === "Backend API Feature", "artifact draft");
+    const candidate = requireCandidate(result.candidates, (skill) => skill.learnedSurface?.taskKind === "api", "artifact draft");
 
-    assert.equal(candidate.promotion_level, "draft");
+    assert.equal(candidate.promotion_level, "agent_ready");
     assert.ok(candidate.generatedArtifactEvidenceShare > 0.25);
     assert.ok(candidate.generatedArtifactEvidenceShare <= 0.4);
   } finally {

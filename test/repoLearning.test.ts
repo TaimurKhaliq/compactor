@@ -84,6 +84,91 @@ test("source and test co-change can promote without a language-specific detector
   }
 });
 
+test("learned commands surface drives skill name and task area", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-command-name-"));
+
+  try {
+    writeFileSync(join(repoRoot, "Cargo.toml"), "[package]\nname = \"grit\"\n");
+    const commits = ["diff", "bundle", "log", "rebase"].map((name, index) => commit(`${index + 1}`.repeat(16), `Update ${name} command`, [
+      `grit/src/commands/${name}.rs`,
+      `grit/tests/commands/${name}_test.rs`
+    ], []));
+
+    const result = minePatterns(scan(commits, repoRoot));
+    const candidate = result.candidates[0];
+
+    assert.ok(candidate);
+    assert.equal(candidate.learnedSurface?.commonDirectory, "grit/src/commands");
+    assert.equal(candidate.learnedSurface?.taskKind, "commands");
+    assert.equal(candidate.primaryArea, "cli");
+    assert.equal(candidate.name, "Update Commands");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("generated docs progress and data terms cannot produce UI names for a commands surface", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-command-noise-"));
+
+  try {
+    writeFileSync(join(repoRoot, "Cargo.toml"), "[package]\nname = \"grit\"\n");
+    const commits = ["diff", "bundle", "log", "rebase"].map((name, index) => commit(`${index + 1}`.repeat(16), `Update data progress UI notes for ${name}`, [
+      `grit/src/commands/${name}.rs`,
+      `grit/tests/commands/${name}_test.rs`,
+      `grit/ui/src/components/progress-data-${index}.tsx`,
+      `grit/docs/progress-data-${index}.md`,
+      `grit/generated/progress-data-${index}.report.json`
+    ], [
+      { type: "function_added", value: `${name}Command`, filePath: `grit/src/commands/${name}.rs` },
+      { type: "function_added", value: `ProgressData${index}`, filePath: `grit/ui/src/components/progress-data-${index}.tsx` },
+      { type: "test_case_added", value: `${name} command`, filePath: `grit/tests/commands/${name}_test.rs` }
+    ]));
+
+    const result = minePatterns(scan(commits, repoRoot));
+    const candidate = result.candidates[0];
+
+    assert.ok(candidate);
+    assert.equal(candidate.learnedSurface?.commonDirectory, "grit/src/commands");
+    assert.equal(candidate.learnedSurface?.taskKind, "commands");
+    assert.equal(candidate.primaryArea, "cli");
+    assert.equal(candidate.name, "Update Commands");
+    assert.doesNotMatch(candidate.name, /Data|Progress|UI/);
+    assert.equal(candidate.learnedSurface.sourceTerms?.includes("data"), false);
+    assert.equal(candidate.learnedSurface.sourceTerms?.includes("progress"), false);
+    assert.equal(candidate.promotion_level, "agent_ready");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("strong learned surface overrides mixed global signals", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "compactor-command-mixed-"));
+
+  try {
+    writeFileSync(join(repoRoot, "Cargo.toml"), "[package]\nname = \"grit\"\n");
+    const commits = ["diff", "bundle", "log", "rebase"].map((name, index) => commit(`${index + 1}`.repeat(16), `Update ${name} command with docs and config`, [
+      `grit/src/commands/${name}.rs`,
+      `grit/tests/commands/${name}_test.rs`,
+      `docs/${name}.md`,
+      `config/${name}.json`,
+      `generated/${name}.report.json`
+    ], [
+      { type: "config_changed", value: `${name}ProgressData`, filePath: `config/${name}.json` },
+      { type: "test_case_added", value: `${name} command`, filePath: `grit/tests/commands/${name}_test.rs` }
+    ]));
+
+    const result = minePatterns(scan(commits, repoRoot));
+    const candidate = result.candidates[0];
+
+    assert.ok(candidate);
+    assert.equal(candidate.primaryArea, "cli");
+    assert.notEqual(candidate.promotion_level, "pattern_candidate");
+    assert.equal(candidate.learnedSurface?.taskKind, "commands");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("validation commands are discovered from the nearest project files for a surface", () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "compactor-surface-validation-"));
 

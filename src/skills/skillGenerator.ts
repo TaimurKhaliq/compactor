@@ -265,11 +265,27 @@ function renderLearnedSurface(candidate: CandidateSkill): string[] {
   }
 
   const lines = [
-    `- Surface: ${surface.displayName}`,
-    `- Directory: ${surface.commonDirectory}`,
+    `- Surface: ${surface.commonDirectory}`,
+    `- Display name: ${surface.displayName}`,
+    ...(surface.taskKind ? [`- Task kind: ${surface.taskKind}`] : []),
     `- Match confidence: ${formatConfidence(surface.confidence)}`,
     `- Commit match share: ${formatConfidence(surface.matchShare)}`
   ];
+
+  if (surface.representativeFiles.length > 0) {
+    lines.push("- Representative source files:");
+    lines.push(...surface.representativeFiles.slice(0, 5).map((file) => `  - ${file}`));
+  }
+
+  if (surface.coChangingTestFiles.length > 0) {
+    lines.push("- Co-changing tests:");
+    lines.push(...surface.coChangingTestFiles.slice(0, 5).map((file) => `  - ${file}`));
+  }
+
+  if (surface.validationCommands.length > 0) {
+    lines.push("- Validation:");
+    lines.push(...surface.validationCommands.map((command) => `  - ${command}`));
+  }
 
   if (surface.repeatedTerms.length > 0) {
     lines.push(`- Repeated terms: ${surface.repeatedTerms.slice(0, 6).join(", ")}`);
@@ -397,6 +413,36 @@ function unique(values: string[]): string[] {
 }
 
 function renderWorkflow(candidate: CandidateSkill): string[] {
+  if (candidate.learnedSurface?.taskKind === "commands") {
+    return [
+      "1. Start from the closest command module listed above.",
+      "2. Update command behavior, argument handling, or option parsing in that module.",
+      "3. Update shared command helpers only when the behavior requires it.",
+      "4. Add or update the co-changing tests for the command path.",
+      "5. Run the validation commands below."
+    ];
+  }
+
+  if (candidate.learnedSurface?.taskKind === "ui") {
+    return [
+      "1. Start from the closest UI source example listed above.",
+      "2. Update the component, screen, view, or client wiring in the learned surface.",
+      "3. Keep generated, docs, or config updates secondary to the source change.",
+      "4. Add or update the co-changing UI tests.",
+      "5. Run the validation commands below."
+    ];
+  }
+
+  if (candidate.learnedSurface?.taskKind === "api") {
+    return [
+      "1. Start from the closest route, controller, handler, or server module listed above.",
+      "2. Update the API behavior in the learned surface.",
+      "3. Update shared helpers only when the API behavior requires it.",
+      "4. Add or update the co-changing tests.",
+      "5. Run the validation commands below."
+    ];
+  }
+
   const sourceStep = workflowSourceStep(candidate);
   const testStep = candidate.genericSignals.some((signal) => signal.includes("test"))
     ? "Update the matching tests beside the nearest example."

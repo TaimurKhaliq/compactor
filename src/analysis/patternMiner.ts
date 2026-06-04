@@ -1,7 +1,7 @@
 import { posix as path } from "node:path";
 import { emptyRoleCounts, inferFileRole, learnRepositoryPatterns } from "./repoLearning.js";
 import { discoverValidationCommandsForFiles } from "../git/packageScripts.js";
-import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, FileRoleCounts, GenericSignal, LearnedSurface, MiningResult, RepoLearning, ScanResult } from "../types.js";
+import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, FileRoleCounts, GenericSignal, LearnedSurface, MiningResult, RepoLearning, ScanResult, SurfaceTaskKind } from "../types.js";
 
 interface WorkingCluster {
   commits: CommitMetadata[];
@@ -258,6 +258,38 @@ const NOISY_EVIDENCE_FILE_PATTERNS = [
   /\.expected\.json$/i,
   /\.report\.json$/i
 ];
+
+const SURFACE_SOURCE_TERM_NOISE = new Set([
+  "src",
+  "source",
+  "lib",
+  "app",
+  "apps",
+  "core",
+  "common",
+  "shared",
+  "index",
+  "main",
+  "mod",
+  "file",
+  "files",
+  "test",
+  "tests",
+  "spec",
+  "docs",
+  "doc",
+  "readme",
+  "generated",
+  "fixture",
+  "fixtures",
+  "replay",
+  "baseline",
+  "baselines",
+  "snapshot",
+  "snapshots",
+  "progress",
+  "data"
+]);
 
 const AGENT_READY_PATTERN_CONFIDENCE = 0.85;
 const AGENT_READY_NAMING_CONFIDENCE = 0.8;
@@ -528,7 +560,7 @@ function surfaceIdsForCommit(repoLearning: RepoLearning, commit: CommitMetadata)
     .map((surface) => surface.id);
 }
 
-function fileBelongsToSurface(filePath: string, surface: LearnedSurface): boolean {
+function fileBelongsToSurface(filePath: string, surface: Pick<LearnedSurfaceMatch, "commonDirectory" | "representativeFiles" | "coChangingTestFiles" | "coChangingConfigOrDocsFiles" | "coChangeEvidence">): boolean {
   const normalized = path.normalize(filePath);
   return normalized === surface.commonDirectory ||
     normalized.startsWith(`${surface.commonDirectory}/`) ||
@@ -538,16 +570,16 @@ function fileBelongsToSurface(filePath: string, surface: LearnedSurface): boolea
     surfaceCoChangeFiles(surface).includes(normalized);
 }
 
-function matchLearnedSurface(repoLearning: RepoLearning, commits: CommitMetadata[], evidenceFiles: string[]): LearnedSurfaceMatch | undefined {
+function matchLearnedSurface(repoLearning: RepoLearning, commits: CommitMetadata[], evidenceFiles: string[], signals: GenericSignal[] = []): LearnedSurfaceMatch | undefined {
   const candidates = repoLearning.surfaces
-    .map((surface) => surfaceMatchScore(surface, commits, evidenceFiles))
+    .map((surface) => surfaceMatchScore(surface, commits, evidenceFiles, signals))
     .filter((match): match is LearnedSurfaceMatch => Boolean(match))
-    .sort((a, b) => b.confidence - a.confidence || b.matchShare - a.matchShare || a.commonDirectory.localeCompare(b.commonDirectory));
+    .sort((a, b) => b.confidence - a.confidence || surfaceSelectionRank(a, signals) - surfaceSelectionRank(b, signals) || surfaceSpecificity(b) - surfaceSpecificity(a) || b.matchShare - a.matchShare || a.commonDirectory.localeCompare(b.commonDirectory));
 
   return candidates[0];
 }
 
-function surfaceMatchScore(surface: LearnedSurface, commits: CommitMetadata[], evidenceFiles: string[]): LearnedSurfaceMatch | undefined {
+function surfaceMatchScore(surface: LearnedSurface, commits: CommitMetadata[], evidenceFiles: string[], signals: GenericSignal[]): LearnedSurfaceMatch | undefined {
   const matchingCommits = commits.filter((commit) => commit.changedFiles.some((file) => fileBelongsToSurface(file, surface)));
   const matchShare = commits.length === 0 ? 0 : matchingCommits.length / commits.length;
   const usefulFiles = unique(evidenceFiles.map((file) => path.normalize(file)));
@@ -564,18 +596,21 @@ function surfaceMatchScore(surface: LearnedSurface, commits: CommitMetadata[], e
     return undefined;
   }
 
-  const confidence = Number(Math.min(0.98, surface.confidence * 0.42 + matchShare * 0.34 + overlapShare * 0.16 + (surface.coChangingTestFiles.length > 0 ? 0.05 : 0) + (surface.validationCommands.length > 0 ? 0.03 : 0)).toFixed(2));
+  const inferredKind = inferSurfaceTaskKind(surface, signals);
+  const confidence = Number(Math.min(0.98, surface.confidence * 0.42 + matchShare * 0.34 + overlapShare * 0.16 + (surface.coChangingTestFiles.length > 0 ? 0.05 : 0) + (surface.validationCommands.length > 0 ? 0.03 : 0) + surfaceSignalAlignmentBoost(inferredKind, signals)).toFixed(2));
   const roleCounts = roleCountsForFiles(usefulFiles);
 
   return {
     id: surface.id,
     displayName: surface.displayName,
     commonDirectory: surface.commonDirectory,
+    taskKind: inferredKind,
     confidence,
     matchShare: Number(matchShare.toFixed(2)),
     representativeFiles: surface.representativeFiles,
     coChangingTestFiles: surface.coChangingTestFiles,
     coChangingConfigOrDocsFiles: surface.coChangingConfigOrDocsFiles,
+    dominantExtensions: surface.dominantExtensions,
     validationCommands: surface.validationCommands,
     repeatedTerms: surface.repeatedTerms,
     coChangeEvidence: surface.coChangeEvidence,
@@ -593,6 +628,214 @@ function surfaceMatchScore(surface: LearnedSurface, commits: CommitMetadata[], e
   };
 }
 
+function surfaceSignalAlignmentBoost(kind: SurfaceTaskKind, signals: GenericSignal[]): number {
+  if (kind === "commands") return signals.includes("cli_command_changed") ? 0.05 : 0.04;
+  if (kind === "ui" && signals.some((signal) => ["ui_changed", "component_changed", "page_or_screen_changed", "frontend_test_changed"].includes(signal))) return 0.04;
+  if (kind === "api" && signals.includes("api_route_changed")) return 0.03;
+  if (kind === "database" && signals.some((signal) => ["db_changed", "migration_changed", "schema_changed", "model_or_entity_changed"].includes(signal))) return 0.03;
+  return 0;
+}
+
+function surfaceSelectionRank(surface: LearnedSurfaceMatch, signals: GenericSignal[]): number {
+  const kind = surface.taskKind ?? inferSurfaceTaskKind(surface, signals);
+  if (kind === "commands") return 0;
+  if (kind === "ui" && signals.some((signal) => ["ui_changed", "component_changed", "page_or_screen_changed", "frontend_test_changed"].includes(signal))) return 1;
+  if (kind === "api" && signals.includes("api_route_changed")) return 2;
+  if (kind === "database") return 3;
+  if (kind === "ui") return 4;
+  return 5;
+}
+
+function surfaceSpecificity(surface: LearnedSurfaceMatch): number {
+  return surface.commonDirectory.split("/").filter(Boolean).length + (surface.representativeFiles.length > 1 ? 0.5 : 0);
+}
+
+function enrichLearnedSurface(surface: LearnedSurfaceMatch, commits: CommitMetadata[], signals: GenericSignal[], scan: ScanResult): LearnedSurfaceMatch {
+  const dynamicNoise = new Set([...projectNoiseTerms(scan), ...topLevelProjectTerms(commits)]);
+  const sourceTerms = surfaceSourceTerms(surface, commits, dynamicNoise);
+  const taskKind = inferSurfaceTaskKind({ ...surface, sourceTerms }, signals);
+  return {
+    ...surface,
+    taskKind,
+    sourceTerms,
+    reasons: [
+      ...surface.reasons,
+      `Surface task kind inferred as ${taskKind}.`,
+      sourceTerms.length > 0
+        ? `Surface source terms used for naming: ${sourceTerms.slice(0, 6).join(", ")}.`
+        : "No strong source-only surface terms were found for naming."
+    ]
+  };
+}
+
+function isStrongLearnedSurface(surface: LearnedSurfaceMatch | undefined): surface is LearnedSurfaceMatch {
+  return Boolean(surface && surface.matchShare >= 0.65 && surface.confidence >= 0.65);
+}
+
+function inferSurfaceTaskKind(surface: Pick<LearnedSurfaceMatch, "commonDirectory" | "representativeFiles" | "coChangingTestFiles" | "validationCommands" | "dominantExtensions" | "roleCounts" | "sourceTerms">, signals: GenericSignal[] = []): SurfaceTaskKind {
+  const sourcePaths = [surface.commonDirectory, ...surface.representativeFiles].map((value) => value.toLowerCase());
+  const sourceText = sourcePaths.join(" ");
+  const extensions = new Set(surface.dominantExtensions ?? []);
+  const sourceTerms = new Set(surface.sourceTerms ?? []);
+  const hasPath = (pattern: RegExp) => sourcePaths.some((value) => pattern.test(value));
+  const hasTerm = (...terms: string[]) => terms.some((term) => sourceTerms.has(term));
+
+  if (hasPath(/(^|\/)(cli|commands?|cmd)(\/|$)/) || hasPath(/(^|\/)src\/(cli|commands?)\//)) {
+    return "commands";
+  }
+
+  if (hasPath(/(^|\/)(ui|web|frontend|client)(\/|$)/) || hasPath(/(^|\/)(ui|web|frontend|client)\/src\/(components?|pages?|screens?|views?|routes?)(\/|$)/) || hasPath(/(^|\/)src\/(components?|pages?|screens?|views?)(\/|$)/)) {
+    return "ui";
+  }
+
+  if (hasPath(/(^|\/)(migrations?|schemas?|database|db|models?|entities?)(\/|$)/) || extensions.has(".sql") || hasTerm("migration", "migrations", "schema", "database")) {
+    return "database";
+  }
+
+  if (hasPath(/(^|\/)(server|api|routes?|controllers?|handlers?)(\/|$)/) || signals.includes("api_route_changed")) {
+    return "api";
+  }
+
+  if (hasPath(/(^|\/)(config|configs|infra|deploy|deployment)(\/|$)/) || signals.some((signal) => ["config_changed", "ci_changed", "docker_changed", "terraform_or_infra_changed", "deployment_changed"].includes(signal))) {
+    return "config";
+  }
+
+  if (hasPath(/(^|\/)(docs?|documentation)(\/|$)/) || /\.(md|mdx|rst|adoc)$/i.test(sourceText)) {
+    return "docs";
+  }
+
+  if ((surface.roleCounts.test > surface.roleCounts.source && surface.roleCounts.source === 0) || surface.representativeFiles.every(isTestFile)) {
+    return "tests";
+  }
+
+  return "source-workflow";
+}
+
+function surfaceSourceTerms(surface: LearnedSurfaceMatch, commits: CommitMetadata[], dynamicNoise = new Set<string>()): string[] {
+  const representativeFiles = new Set(surface.representativeFiles.map((file) => path.normalize(file)));
+  const evidence = new Map<string, { files: Set<string>; commits: Set<string>; directory: boolean }>();
+  const add = (rawTerm: string, context: { file?: string; commit?: string; directory?: boolean }) => {
+    const term = normalizeTerm(rawTerm);
+    if (!term || dynamicNoise.has(term) || isSurfaceSourceNoiseTerm(term)) return;
+    const entry = evidence.get(term) ?? { files: new Set<string>(), commits: new Set<string>(), directory: false };
+    if (context.file) entry.files.add(context.file);
+    if (context.commit) entry.commits.add(context.commit);
+    if (context.directory) entry.directory = true;
+    evidence.set(term, entry);
+  };
+
+  for (const term of pathTerms(surface.commonDirectory)) {
+    add(term, { directory: true });
+  }
+
+  for (const file of surface.representativeFiles) {
+    for (const term of [...pathTerms(file), ...pathTerms(path.dirname(file))]) {
+      add(term, { file });
+    }
+  }
+
+  for (const commit of commits) {
+    for (const file of commit.changedFiles) {
+      const normalized = path.normalize(file);
+      if (inferFileRole(normalized) !== "source" || !fileBelongsToSurface(normalized, surface)) {
+        continue;
+      }
+
+      for (const term of [...pathTerms(normalized), ...pathTerms(path.dirname(normalized))]) {
+        add(term, { commit: commit.hash, file: normalized });
+      }
+    }
+
+    for (const signal of commit.diffSummary.signals) {
+      if (representativeFiles.has(path.normalize(signal.filePath)) && inferFileRole(signal.filePath) === "source") {
+        for (const term of signalValueTerms(signal)) {
+          add(term, { commit: commit.hash, file: signal.filePath });
+        }
+      }
+    }
+  }
+
+  const selected = [...evidence.entries()]
+    .filter(([, entry]) => entry.directory || entry.files.size >= 2 || entry.commits.size >= 2)
+    .sort((a, b) => surfaceTermStrength(b[1]) - surfaceTermStrength(a[1]) || a[0].localeCompare(b[0]))
+    .map(([term]) => term);
+
+  return dedupeSingularPlural(selected)
+    .slice(0, 8);
+}
+
+function surfaceTermStrength(entry: { files: Set<string>; commits: Set<string>; directory: boolean }): number {
+  return entry.files.size + entry.commits.size + (entry.directory ? 1 : 0);
+}
+
+function isSurfaceSourceNoiseTerm(term: string): boolean {
+  return SURFACE_SOURCE_TERM_NOISE.has(term) || isNoisyTerm(term);
+}
+
+function surfaceDomainTerms(surface: LearnedSurfaceMatch): string[] {
+  if (surface.taskKind === "commands") {
+    return [];
+  }
+
+  return (surface.sourceTerms ?? [])
+    .filter((term) => !surfaceTaskGenericTerms(surface.taskKind).has(term))
+    .slice(0, 3);
+}
+
+function surfaceTaskGenericTerms(kind: SurfaceTaskKind | undefined): Set<string> {
+  const terms = new Set(["source", "workflow"]);
+  if (kind === "ui") ["ui", "web", "frontend", "client", "api", "component", "components", "page", "pages", "screen", "screens", "view", "views"].forEach((term) => terms.add(term));
+  if (kind === "api") ["api", "route", "routes", "server", "handler", "handlers", "controller", "controllers"].forEach((term) => terms.add(term));
+  if (kind === "database") ["db", "database", "schema", "schemas", "migration", "migrations", "model", "models"].forEach((term) => terms.add(term));
+  if (kind === "config") ["config", "configs", "runtime", "build", "infra"].forEach((term) => terms.add(term));
+  if (kind === "docs") ["docs", "documentation"].forEach((term) => terms.add(term));
+  if (kind === "tests") ["test", "tests", "spec", "specs"].forEach((term) => terms.add(term));
+  if (kind === "commands") ["command", "commands", "cmd", "cli"].forEach((term) => terms.add(term));
+  return terms;
+}
+
+function primaryAreaForSurfaceTaskKind(kind: SurfaceTaskKind): PrimaryArea {
+  switch (kind) {
+    case "commands":
+      return "cli";
+    case "ui":
+      return "frontend";
+    case "api":
+      return "backend";
+    case "database":
+      return "db";
+    case "config":
+      return "infra";
+    case "docs":
+      return "docs";
+    case "tests":
+      return "tests";
+    default:
+      return "unknown";
+  }
+}
+
+function genericCategoryForSurfaceTaskKind(kind: SurfaceTaskKind): string {
+  switch (kind) {
+    case "commands":
+      return "Learned Commands Surface";
+    case "ui":
+      return "Learned UI Surface";
+    case "api":
+      return "Learned API Surface";
+    case "database":
+      return "Learned Database Surface";
+    case "config":
+      return "Learned Configuration Surface";
+    case "docs":
+      return "Learned Documentation Surface";
+    case "tests":
+      return "Learned Test Surface";
+    default:
+      return "Learned Source Workflow Surface";
+  }
+}
+
 function roleCountsForFiles(files: string[]): FileRoleCounts {
   const counts = emptyRoleCounts();
   for (const file of files) {
@@ -606,7 +849,10 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
   const dominant = dominantSignals(cluster, 10);
   const evidenceFiles = filteredEvidenceFiles(commits);
   const repoLearning = scan.repoLearning ?? learnRepositoryPatterns(scan);
-  const learnedSurface = matchLearnedSurface(repoLearning, commits, evidenceFiles);
+  const matchedSurface = matchLearnedSurface(repoLearning, commits, evidenceFiles, dominant);
+  const learnedSurface = matchedSurface ? enrichLearnedSurface(matchedSurface, commits, dominant, scan) : undefined;
+  const strongLearnedSurface = isStrongLearnedSurface(learnedSurface) ? learnedSurface : undefined;
+  const strongSurface = Boolean(strongLearnedSurface);
   const termEvidence = refineDomainTermEvidence(computeDomainTermEvidence(commits, scan), commits, dominant);
   const proposal = proposeSkillName(dominant, termEvidence, frameworkHints(commits));
   const patternConfidence = calculatePatternConfidence(cluster, scan.commitsAnalyzed);
@@ -614,23 +860,27 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
   const commonDirectories = topValues(evidenceFiles.map((file) => path.dirname(file) === "." ? "repo root" : path.dirname(file)), 6);
   const pathSignals = topValues(commits.flatMap((commit) => commit.pathSignals), 12);
   const diffSignals = topDiffSignalLabels(commits, 12);
-  const terms = unique([...termEvidence.repeated, ...(learnedSurface?.repeatedTerms ?? [])]);
+  const surfaceTerms = learnedSurface?.sourceTerms ?? [];
+  const finalDomainTerms = strongLearnedSurface ? surfaceDomainTerms(strongLearnedSurface) : proposal.domainTerms;
+  const terms = strongLearnedSurface ? surfaceTerms : unique([...termEvidence.repeated, ...(learnedSurface?.repeatedTerms ?? [])]);
   const validationCommands = unique([
     ...(learnedSurface?.validationCommands ?? []),
     ...discoverValidationCommandsForFiles(scan.repoRoot, unique([...commonFiles, ...(learnedSurface?.representativeFiles ?? []), ...(learnedSurface?.coChangingTestFiles ?? [])]))
   ]);
   const taskEvidenceFiles = unique(evidenceFiles);
-  const taskArea = effectiveTaskArea(commits, dominant, taskEvidenceFiles);
+  const taskArea = effectiveTaskArea(commits, dominant, taskEvidenceFiles, learnedSurface);
   const artifactShare = generatedArtifactEvidenceShare(commits);
-  const taskName = generateTaskSkillName(taskArea, dominant, taskEvidenceFiles, proposal.domainTerms, proposal.genericCategory, learnedSurface);
-  const namingAdjustment = adjustedNamingConfidence(proposal.namingConfidence, commits, dominant, taskEvidenceFiles, taskArea, proposal.genericCategory, validationCommands, artifactShare, taskName, proposal.domainTerms, learnedSurface);
+  const finalGenericCategory = strongLearnedSurface ? genericCategoryForSurfaceTaskKind(strongLearnedSurface.taskKind ?? "source-workflow") : proposal.genericCategory;
+  const finalGenericFallbackName = strongLearnedSurface ? learnedSurfaceTaskName(strongLearnedSurface, dominant) : proposal.genericFallbackName;
+  const taskName = generateTaskSkillName(taskArea, dominant, taskEvidenceFiles, finalDomainTerms, finalGenericCategory, learnedSurface);
+  const namingAdjustment = adjustedNamingConfidence(proposal.namingConfidence, commits, dominant, taskEvidenceFiles, taskArea, finalGenericCategory, validationCommands, artifactShare, taskName, finalDomainTerms, learnedSurface);
   const promotion = decidePromotion(
     commits,
     dominant,
     taskEvidenceFiles,
     patternConfidence,
     namingAdjustment.confidence,
-    proposal.genericCategory,
+    finalGenericCategory,
     terms,
     validationCommands,
     taskName,
@@ -646,7 +896,7 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
   return {
     id,
     name: candidateName,
-    taskDescription: generateTaskDescription(candidateName, promotion.primaryArea, commits, dominant, taskEvidenceFiles, proposal.domainTerms, proposal.genericCategory, learnedSurface),
+    taskDescription: generateTaskDescription(candidateName, promotion.primaryArea, commits, dominant, taskEvidenceFiles, finalDomainTerms, finalGenericCategory, learnedSurface),
     outputType: promotion.outputType,
     promotion_level: promotion.promotionLevel,
     primaryArea: promotion.primaryArea,
@@ -666,16 +916,25 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
     suggestedValidationCommands: validationCommands,
     genericSignals: dominant,
     repeatedTerms: terms,
-    domainTerms: proposal.domainTerms,
+    domainTerms: finalDomainTerms,
     rejectedNoisyTerms: proposal.rejectedNoisyTerms,
-    genericCategory: proposal.genericCategory,
-    genericFallbackName: proposal.genericFallbackName,
-    namingReasons: [...proposal.reasons, ...namingAdjustment.reasons],
+    genericCategory: finalGenericCategory,
+    genericFallbackName: finalGenericFallbackName,
+    namingReasons: strongLearnedSurface
+      ? [
+          `learned surface used for name: ${strongLearnedSurface.displayName} (${strongLearnedSurface.commonDirectory})`,
+          `surface task kind selected: ${strongLearnedSurface.taskKind ?? "source-workflow"}`,
+          (strongLearnedSurface.sourceTerms ?? []).length > 0
+            ? `source-only surface terms used for name: ${(strongLearnedSurface.sourceTerms ?? []).slice(0, 6).join(", ")}`
+            : "no source-only domain terms were strong enough for the name",
+          ...namingAdjustment.reasons
+        ]
+      : [...proposal.reasons, ...namingAdjustment.reasons],
     frameworkHints: frameworkHints(commits),
     matchedPatterns: dominant,
     pathSignals,
     diffSignals,
-    confidenceFactors: confidenceFactors(cluster, scan.commitsAnalyzed, [...proposal.reasons, ...namingAdjustment.reasons], learnedSurface),
+    confidenceFactors: confidenceFactors(cluster, scan.commitsAnalyzed, strongLearnedSurface ? [`learned surface used for name: ${strongLearnedSurface.displayName}`, ...namingAdjustment.reasons] : [...proposal.reasons, ...namingAdjustment.reasons], learnedSurface),
     falsePositiveNotes: falsePositiveNotes(dominant, commits, namingConfidence),
     rationale: learnedSurface
       ? `Compactor grouped ${commits.length} commits around learned surface ${learnedSurface.displayName} (${learnedSurface.commonDirectory}) with repeated change shape: ${dominant.join(", ") || "source/test co-change"}.`
@@ -962,8 +1221,8 @@ function generateTaskSkillName(
   genericCategory: string,
   learnedSurface?: LearnedSurfaceMatch
 ): string {
-  const surfaceName = learnedSurface ? learnedSurfaceTaskName(learnedSurface, terms, commonFiles, signals) : "";
-  if (surfaceName && shouldPreferSurfaceTaskName(area, genericCategory, signals)) {
+  const surfaceName = learnedSurface ? learnedSurfaceTaskName(learnedSurface, signals) : "";
+  if (surfaceName && shouldPreferSurfaceTaskName(learnedSurface, area, genericCategory, signals)) {
     return surfaceName;
   }
 
@@ -1017,7 +1276,11 @@ function generateTaskSkillName(
   return "Update Engineering Workflow";
 }
 
-function shouldPreferSurfaceTaskName(area: PrimaryArea, genericCategory: string, signals: GenericSignal[]): boolean {
+function shouldPreferSurfaceTaskName(learnedSurface: LearnedSurfaceMatch | undefined, area: PrimaryArea, genericCategory: string, signals: GenericSignal[]): boolean {
+  if (isStrongLearnedSurface(learnedSurface)) {
+    return learnedSurface.taskKind !== "source-workflow" || (learnedSurface.sourceTerms ?? []).length > 0 || learnedSurface.confidence >= 0.8;
+  }
+
   if (area === "unknown" || area === "mixed" || area === "tests") {
     return true;
   }
@@ -1028,44 +1291,38 @@ function shouldPreferSurfaceTaskName(area: PrimaryArea, genericCategory: string,
   return nonTestSignals.length === 0;
 }
 
-function learnedSurfaceTaskName(surface: LearnedSurfaceMatch, terms: string[], commonFiles: string[], signals: GenericSignal[]): string {
-  const surfaceTerms = new Set([
-    ...surface.repeatedTerms,
-    ...terms,
-    ...pathTerms(surface.commonDirectory),
-    ...commonFiles.flatMap((file) => [...pathTerms(file), ...pathTerms(path.dirname(file))])
-  ].map((term) => normalizeTerm(term)).filter((term): term is string => Boolean(term)).filter((term) => !isFeatureNoiseTerm(term)));
-  const directoryTermsSet = new Set(pathTerms(surface.commonDirectory).map((term) => normalizeTerm(term)).filter((term): term is string => Boolean(term)));
-  const has = (...values: string[]) => values.some((value) => surfaceTerms.has(value));
-  const strongCommandTerm = surface.repeatedTerms.some((term) => /^(cli|command|commands|flag|flags|option|options)$/.test(term)) || signals.includes("cli_command_changed");
-  const domainTerms = dedupeSingularPlural([...surfaceTerms].filter((term) => !directoryTermsSet.has(term) && !["command", "commands", "component", "components", "server", "client"].includes(term))).slice(0, 2);
+function learnedSurfaceTaskName(surface: LearnedSurfaceMatch, signals: GenericSignal[]): string {
+  const kind = surface.taskKind ?? inferSurfaceTaskKind(surface, signals);
+  const strongCommandSignal = signals.includes("cli_command_changed");
+  const domainTerms = surfaceDomainTerms(surface).slice(0, 2);
   const domain = domainTerms.map(domainTermToTitle).join(" ");
 
-  if (has("ui", "frontend", "client", "web", "component", "components", "page", "pages", "screen", "screens", "view", "views")) {
-    return domain ? `Update ${domain} UI` : "Update UI Surface";
-  }
-
-  if (has("command", "commands", "cmd", "cli")) {
-    if (strongCommandTerm) {
-      return domain ? `Add or Update ${domain} CLI Workflow` : "Add CLI Command";
+  switch (kind) {
+    case "commands":
+      return strongCommandSignal ? "Add CLI Command" : "Update Commands";
+    case "ui":
+      if (domainTerms.some((term) => ["grid", "table", "columns", "column"].includes(term))) {
+        return "Update Grid UI";
+      }
+      if (domainTerms.some((term) => ["report", "reporting", "reports"].includes(term))) {
+        return "Update Reporting UI";
+      }
+      return domain ? `Update ${domain} UI` : "Update UI";
+    case "api":
+      return domain ? `Update ${domain} API Behavior` : "Update API Behavior";
+    case "database":
+      return domain ? `Update ${domain} Database Schema` : "Update Database Schema";
+    case "config":
+      return domain ? `Update ${domain} Runtime Configuration` : "Update Runtime Configuration";
+    case "docs":
+      return domain ? `Update ${domain} Documentation` : "Update Documentation";
+    case "tests":
+      return domain ? `Update ${domain} Tests` : "Update Tests";
+    default: {
+      const base = surfaceBaseName(surface);
+      return domain && !base.toLowerCase().includes(domain.toLowerCase()) ? `Update ${domain} ${base} Workflow` : `Update ${base} Workflow`;
     }
-    return domain ? `Update ${domain} Commands` : "Update Commands";
   }
-
-  if (has("migration", "migrations", "schema", "schemas", "database", "db")) {
-    return domain ? `Update ${domain} Database Schema` : "Update Database Schema";
-  }
-
-  if (has("api", "route", "routes", "server", "handler", "handlers")) {
-    return domain ? `Update ${domain} API Behavior` : "Update API Behavior";
-  }
-
-  if (has("docs", "documentation", "readme", "changelog")) {
-    return domain ? `Update ${domain} Documentation` : "Update Project Documentation";
-  }
-
-  const base = surfaceBaseName(surface);
-  return domain && !base.toLowerCase().includes(domain.toLowerCase()) ? `Update ${domain} ${base}` : `Update ${base}`;
 }
 
 function surfaceBaseName(surface: LearnedSurfaceMatch): string {
@@ -1090,13 +1347,13 @@ function generateTaskDescription(
   genericCategory: string,
   learnedSurface?: LearnedSurfaceMatch
 ): string {
-  if (learnedSurface && shouldPreferSurfaceTaskDescription(primaryAreaValue, genericCategory, signals)) {
+  if (learnedSurface && shouldPreferSurfaceTaskDescription(learnedSurface, primaryAreaValue, genericCategory, signals)) {
     const examples = learnedSurface.representativeFiles.slice(0, 2).map((file) => path.basename(file).replace(/\.[^.]+$/i, "")).join(", ");
     return `Use this for changes to the learned ${learnedSurface.displayName} under ${learnedSurface.commonDirectory}${examples ? `, including examples like ${examples}` : ""}.`;
   }
 
   const area = primaryAreaValue === "mixed" || primaryAreaValue === "unknown"
-    ? effectiveTaskArea(commits, signals, commonFiles)
+    ? effectiveTaskArea(commits, signals, commonFiles, learnedSurface)
     : primaryAreaValue;
   const feature = lowerFeaturePhrase(dominantFeatureNoun(terms, commonFiles, signals, area, genericCategory));
   const hasApi = hasApiSignal(signals, genericCategory);
@@ -1144,11 +1401,18 @@ function generateTaskDescription(
   return "Use this for repeated repository changes where the examples and evidence show a concrete source/test workflow.";
 }
 
-function shouldPreferSurfaceTaskDescription(area: PrimaryArea, genericCategory: string, signals: GenericSignal[]): boolean {
-  return shouldPreferSurfaceTaskName(area, genericCategory, signals) || /Surface$/.test(genericCategory);
+function shouldPreferSurfaceTaskDescription(surface: LearnedSurfaceMatch | undefined, area: PrimaryArea, genericCategory: string, signals: GenericSignal[]): boolean {
+  return shouldPreferSurfaceTaskName(surface, area, genericCategory, signals) || /Surface$/.test(genericCategory);
 }
 
-function effectiveTaskArea(commits: CommitMetadata[], signals: GenericSignal[], commonFiles: string[]): PrimaryArea {
+function effectiveTaskArea(commits: CommitMetadata[], signals: GenericSignal[], commonFiles: string[], learnedSurface?: LearnedSurfaceMatch): PrimaryArea {
+  if (isStrongLearnedSurface(learnedSurface)) {
+    const surfaceArea = primaryAreaForSurfaceTaskKind(learnedSurface.taskKind ?? inferSurfaceTaskKind(learnedSurface, signals));
+    if (surfaceArea !== "unknown") {
+      return surfaceArea;
+    }
+  }
+
   if (hasUiEvidence(commits, signals, commonFiles)) return "frontend";
   if (signals.includes("cli_command_changed")) return "cli";
   if (signals.includes("api_route_changed") || signals.includes("controller_changed") || signals.includes("service_layer_changed")) return "backend";
@@ -1259,12 +1523,14 @@ function adjustedNamingConfidence(
     }
   }
 
-  if (artifactShare > AGENT_READY_MAX_ARTIFACT_SHARE) {
+  if (artifactShare > AGENT_READY_MAX_ARTIFACT_SHARE && !(isStrongLearnedSurface(learnedSurface) && artifactShare <= 0.5)) {
     const capped = Math.min(confidence, 0.7);
     if (capped < confidence) {
       reasons.push("naming confidence capped at 70% because generated artifacts are a large share of the evidence");
       confidence = capped;
     }
+  } else if (artifactShare > AGENT_READY_MAX_ARTIFACT_SHARE && isStrongLearnedSurface(learnedSurface)) {
+    reasons.push("generated artifacts were secondary to a strong learned source surface, so they did not drive the name");
   }
 
   if (domainTerms.length > 0 && !taskNameUsesDomainTerms(taskName, domainTerms)) {
@@ -1451,14 +1717,17 @@ function decidePromotion(
   const hasJunkName = hasObviousJunkName(proposedTaskName);
   const surfaceConfidence = learnedSurface?.confidence ?? 0;
   const surfaceShare = learnedSurface?.matchShare ?? 0;
+  const strongSurface = isStrongLearnedSurface(learnedSurface);
+  const promotionPrimaryShare = strongSurface ? Math.max(primary.share, surfaceShare) : primary.share;
+  const promotionArtifactShare = strongSurface ? Math.min(artifactShare, 0.2) : artifactShare;
   const agentReadyFailures = thresholdFailures({
     commitCount: commits.length,
     patternConfidence,
     namingConfidence,
-    primaryShare: primary.share,
+    primaryShare: promotionPrimaryShare,
     surfaceConfidence,
     surfaceShare,
-    artifactShare,
+    artifactShare: promotionArtifactShare,
     workflowQuality,
     representativeFileCount,
     hasWorkflow,
@@ -1487,7 +1756,7 @@ function decidePromotion(
       outputType: "skill",
       promotionLevel: "agent_ready",
       primaryArea: taskArea === "unknown" || taskArea === "mixed" ? primary.area : taskArea,
-      primaryAreaShare: primary.share,
+      primaryAreaShare: promotionPrimaryShare,
       workflowQuality,
       generatedArtifactEvidenceShare: artifactShare,
       reasons: ["Promoted to agent-ready skill."],
@@ -1499,10 +1768,10 @@ function decidePromotion(
     commitCount: commits.length,
     patternConfidence,
     namingConfidence,
-    primaryShare: primary.share,
+    primaryShare: promotionPrimaryShare,
     surfaceConfidence,
     surfaceShare,
-    artifactShare,
+    artifactShare: promotionArtifactShare,
     workflowQuality,
     representativeFileCount,
     hasWorkflow,
@@ -1530,7 +1799,7 @@ function decidePromotion(
       outputType: "skill",
       promotionLevel: "draft",
       primaryArea: taskArea === "unknown" || taskArea === "mixed" ? primary.area : taskArea,
-      primaryAreaShare: primary.share,
+      primaryAreaShare: promotionPrimaryShare,
       workflowQuality,
       generatedArtifactEvidenceShare: artifactShare,
       reasons: agentReadyFailures.length > 0 ? agentReadyFailures : ["Needs human review before becoming trusted guidance."],

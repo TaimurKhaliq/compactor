@@ -75,12 +75,14 @@ function renderLearnedSurface(skill: CandidateSkill): string[] {
   return [
     `- Surface: ${surface.displayName}`,
     `- Directory: ${surface.commonDirectory}`,
+    `- Task kind: ${surface.taskKind ?? "unknown"}`,
     `- Surface confidence: ${Math.round(surface.confidence * 100)}%`,
     `- Evidence commit match share: ${Math.round(surface.matchShare * 100)}%`,
     `- Representative source files: ${surface.representativeFiles.slice(0, 5).join(", ") || "None"}`,
     `- Co-changing tests: ${surface.coChangingTestFiles.slice(0, 5).join(", ") || "None"}`,
     `- Co-changing config/docs: ${surface.coChangingConfigOrDocsFiles.slice(0, 5).join(", ") || "None"}`,
     `- Validation commands: ${surface.validationCommands.join(", ") || "None"}`,
+    `- Source-only terms: ${(surface.sourceTerms ?? []).join(", ") || "None"}`,
     `- Role counts: ${Object.entries(surface.roleCounts).map(([role, count]) => `${role}=${count}`).join(", ")}`,
     ...surface.coChangeEvidence.slice(0, 5).map((edge) => `- Co-change ${edge.weight} commits: ${edge.files.join(" + ")}`),
     ...surface.reasons.map((reason) => `- ${reason}`)

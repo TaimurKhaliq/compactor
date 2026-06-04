@@ -151,6 +151,8 @@ export interface LearnedSurface {
   coChangeEvidence: CoChangePair[];
 }
 
+export type SurfaceTaskKind = "commands" | "ui" | "api" | "database" | "config" | "docs" | "tests" | "source-workflow";
+
 export interface RepoLearning {
   generatedAt: string;
   topFilesByFrequency: FileFrequency[];
@@ -225,13 +227,16 @@ export interface CandidateSkill {
     id: string;
     displayName: string;
     commonDirectory: string;
+    taskKind?: SurfaceTaskKind;
     confidence: number;
     matchShare: number;
     representativeFiles: string[];
     coChangingTestFiles: string[];
     coChangingConfigOrDocsFiles: string[];
+    dominantExtensions?: string[];
     validationCommands: string[];
     repeatedTerms: string[];
+    sourceTerms?: string[];
     coChangeEvidence: CoChangePair[];
     roleCounts: FileRoleCounts;
     reasons: string[];
