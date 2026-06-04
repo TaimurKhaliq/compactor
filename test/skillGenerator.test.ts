@@ -94,6 +94,15 @@ function sampleCandidate(): CandidateSkill {
     suggestedValidationCommands: ["npm test"],
     genericSignals: ["ui_changed", "component_changed"],
     repeatedTerms: ["orders", "grid"],
+    domainTerms: ["orders", "grid"],
+    rejectedNoisyTerms: ["component", "test"],
+    genericCategory: "UI Component Pattern",
+    genericFallbackName: "Add or Update UI Component Feature",
+    namingReasons: [
+      "component and frontend/test signals repeated together",
+      "domain terms used for name: orders, grid",
+      "rejected noisy terms: component, test"
+    ],
     frameworkHints: ["angular"],
     matchedPatterns: ["grid-table-files"],
     pathSignals: ["ui_changed", "component_changed"],

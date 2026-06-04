@@ -151,6 +151,11 @@ export interface CandidateSkill {
   suggestedValidationCommands: string[];
   genericSignals: GenericSignal[];
   repeatedTerms: string[];
+  domainTerms: string[];
+  rejectedNoisyTerms: string[];
+  genericCategory: string;
+  genericFallbackName: string;
+  namingReasons: string[];
   frameworkHints: string[];
   matchedPatterns: string[];
   pathSignals: string[];

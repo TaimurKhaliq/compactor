@@ -70,7 +70,9 @@ The explanation includes:
 - evidence commits
 - path signals
 - structured diff signals
-- repeated terms used for naming
+- domain terms used for naming
+- rejected noisy terms
+- generic category and fallback name
 - pattern and naming confidence factors
 - possible false-positive notes
 
@@ -115,12 +117,18 @@ Compactor now mines generic change shapes rather than fixed repo-specific rules.
 Candidate names are proposed from evidence. Examples:
 
 - `Add or Update Backend API Feature`
+- `Add or Update Audit Reporting Backend API Feature`
+- `Add or Update Grid Table UI Component Pattern`
+- `Add or Update Account Database-Backed Feature`
 - `Add or Update Database-Backed Feature`
 - `Update Database Schema and Queries`
 - `Add or Update Async Job/Event Handler`
+- `Add or Update CLI Feature`
 - `Add or Update UI Component Feature`
 - `Update Build or CI Configuration`
 - fallback names such as `Update Backend and Test Pattern` or `Update Full-Stack Feature Pattern` when semantic naming confidence is lower
+
+When repeated repository vocabulary is strong enough, Compactor combines it with the generic category. It mines domain terms from commit messages, filenames, directories, and added function/class/test names, then filters noisy terms such as `add`, `update`, `test`, `src`, `component`, `service`, route verbs, and SQL syntax words.
 
 ### `compactor generate`
 
@@ -142,6 +150,7 @@ Each generated skill includes:
 - pattern confidence and naming confidence
 - when to use
 - why Compactor proposed it
+- naming explanation with domain terms, rejected noisy terms, generic category, and fallback name
 - generic signals detected
 - common files/directories
 - repeated terms
