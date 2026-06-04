@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { classifyCommit, collectRepeatedPathPatterns } from "../analysis/classifier.js";
+import { learnRepositoryPatterns } from "../analysis/repoLearning.js";
 import { parseUnifiedDiff } from "./diffParser.js";
 import { discoverValidationCommands, readPackageScripts } from "./packageScripts.js";
 import { prepareRepository } from "./repository.js";
@@ -35,7 +36,7 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
     };
   });
 
-  return {
+  const scanWithoutLearning = {
     repoRoot,
     repositorySource: target.source,
     repositoryInput: target.input,
@@ -47,6 +48,11 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
     commitsAnalyzed: commits.length,
     commits,
     repeatedPathPatterns: collectRepeatedPathPatterns(commits)
+  };
+
+  return {
+    ...scanWithoutLearning,
+    repoLearning: learnRepositoryPatterns(scanWithoutLearning)
   };
 }
 

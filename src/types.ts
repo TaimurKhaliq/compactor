@@ -113,6 +113,54 @@ export interface PatternCount {
   commits: string[];
 }
 
+export type FileRole = "source" | "test" | "config" | "docs" | "generated" | "lockfile" | "fixture" | "build-output" | "unknown";
+
+export interface FileFrequency {
+  filePath: string;
+  commitCount: number;
+  role: FileRole;
+}
+
+export interface DirectoryFrequency {
+  directory: string;
+  commitCount: number;
+}
+
+export interface CoChangePair {
+  files: [string, string];
+  weight: number;
+  sharedCommits: string[];
+}
+
+export type FileRoleCounts = Record<FileRole, number>;
+
+export interface LearnedSurface {
+  id: string;
+  displayName: string;
+  commonDirectory: string;
+  representativeFiles: string[];
+  coChangingTestFiles: string[];
+  coChangingConfigOrDocsFiles: string[];
+  dominantExtensions: string[];
+  repeatedTerms: string[];
+  validationCommands: string[];
+  confidence: number;
+  commitCount: number;
+  sourceFileCount: number;
+  roleCounts: FileRoleCounts;
+  coChangeEvidence: CoChangePair[];
+}
+
+export interface RepoLearning {
+  generatedAt: string;
+  topFilesByFrequency: FileFrequency[];
+  topDirectoriesByFrequency: DirectoryFrequency[];
+  strongestCoChangePairs: CoChangePair[];
+  fileClusters: LearnedSurface[];
+  surfaces: LearnedSurface[];
+  fileRoles: Record<string, FileRole>;
+}
+
 export interface ScanResult {
   repoRoot: string;
   repositorySource?: "local" | "remote";
@@ -125,6 +173,7 @@ export interface ScanResult {
   commitsAnalyzed: number;
   commits: CommitMetadata[];
   repeatedPathPatterns: PatternCount[];
+  repoLearning?: RepoLearning;
 }
 
 export interface EvidenceCommit {
@@ -172,6 +221,21 @@ export interface CandidateSkill {
   confidenceFactors: string[];
   falsePositiveNotes: string[];
   rationale: string;
+  learnedSurface?: {
+    id: string;
+    displayName: string;
+    commonDirectory: string;
+    confidence: number;
+    matchShare: number;
+    representativeFiles: string[];
+    coChangingTestFiles: string[];
+    coChangingConfigOrDocsFiles: string[];
+    validationCommands: string[];
+    repeatedTerms: string[];
+    coChangeEvidence: CoChangePair[];
+    roleCounts: FileRoleCounts;
+    reasons: string[];
+  };
 }
 
 export type SkillStatus = "fresh" | "draft" | "stale" | "drifting" | "deprecated";

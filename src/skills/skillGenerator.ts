@@ -174,9 +174,11 @@ export function renderSkillMarkdown(candidate: CandidateSkill, metadata = create
     "",
     `Pattern confidence: ${formatConfidence(candidate.patternConfidence)}`,
     `Naming confidence: ${formatConfidence(candidate.namingConfidence)}`,
+    ...(candidate.learnedSurface ? ["", "This skill is based on a learned implementation surface."] : []),
     "",
     "## When to use",
     renderWhenToUse(candidate),
+    ...(candidate.learnedSurface ? ["", "## Learned surface", ...renderLearnedSurface(candidate)] : []),
     "",
     "## Relevant examples",
     ...renderRelevantExamples(candidate),
@@ -256,6 +258,30 @@ function renderWhenToUse(candidate: CandidateSkill): string {
   return `Use this when modifying ${task}${examples ? `, such as ${examples}` : ""}.`;
 }
 
+function renderLearnedSurface(candidate: CandidateSkill): string[] {
+  const surface = candidate.learnedSurface;
+  if (!surface) {
+    return [];
+  }
+
+  const lines = [
+    `- Surface: ${surface.displayName}`,
+    `- Directory: ${surface.commonDirectory}`,
+    `- Match confidence: ${formatConfidence(surface.confidence)}`,
+    `- Commit match share: ${formatConfidence(surface.matchShare)}`
+  ];
+
+  if (surface.repeatedTerms.length > 0) {
+    lines.push(`- Repeated terms: ${surface.repeatedTerms.slice(0, 6).join(", ")}`);
+  }
+
+  if (surface.coChangeEvidence.length > 0) {
+    lines.push(`- Strong co-change: ${surface.coChangeEvidence[0]?.files.join(" + ")} (${surface.coChangeEvidence[0]?.weight} commits)`);
+  }
+
+  return lines;
+}
+
 function toWhenToUse(taskDescription: string): string {
   if (/reporting dashboard\/workbench UI changes/i.test(taskDescription)) {
     return "Use this when modifying the reporting dashboard, workbench UI, API client wiring, or related UI tests.";
@@ -299,6 +325,8 @@ function prioritizedExampleFiles(candidate: CandidateSkill): string[] {
 
 function exampleFilePool(candidate: CandidateSkill): string[] {
   return unique([
+    ...(candidate.learnedSurface?.representativeFiles ?? []),
+    ...(candidate.learnedSurface?.coChangingTestFiles ?? []),
     ...candidate.commonFiles,
     ...candidate.evidenceCommits.flatMap((commit) => commit.changedFiles)
   ]);
@@ -306,6 +334,17 @@ function exampleFilePool(candidate: CandidateSkill): string[] {
 
 function examplePriority(candidate: CandidateSkill, file: string): number {
   const lower = file.toLowerCase();
+  const surface = candidate.learnedSurface;
+
+  if (surface) {
+    if (surface.representativeFiles.includes(file) && isRenderableSourceFile(lower)) return 0;
+    if (surface.coChangingTestFiles.includes(file)) return 1;
+    if (surface.coChangingConfigOrDocsFiles.includes(file)) return 3;
+    if (isRenderableSourceFile(lower) && lower.startsWith(`${surface.commonDirectory.toLowerCase()}/`)) return 0;
+    if (isRenderableSourceFile(lower)) return 2;
+    if (isRenderableTestFile(lower)) return 3;
+    return 4;
+  }
 
   if (candidate.primaryArea === "frontend") {
     if (/(^|\/)(ui|frontend|client|web)\/src\/components?\//.test(lower) || /(^|\/)src\/components?\//.test(lower)) return 0;
@@ -346,7 +385,7 @@ function examplePriority(candidate: CandidateSkill, file: string): number {
 }
 
 function isRenderableTestFile(file: string): boolean {
-  return /(\.spec\.|\.(test|tests)\.)|(^|\/)(__tests__|tests?|e2e|playwright|cypress)(\/|$)/i.test(file);
+  return /(\.spec\.|\.(test|tests)\.|_(test|spec)\.)|(^|\/)(__tests__|tests?|specs?|e2e|playwright|cypress)(\/|$)/i.test(file);
 }
 
 function isRenderableSourceFile(file: string): boolean {
@@ -434,6 +473,10 @@ function renderHumanReview(candidate: CandidateSkill): string[] {
 }
 
 function taskPhrase(candidate: CandidateSkill): string {
+  if (candidate.learnedSurface) {
+    return `${candidate.learnedSurface.displayName} changes under ${candidate.learnedSurface.commonDirectory}`;
+  }
+
   const domain = candidate.domainTerms.length > 0 ? `${candidate.domainTerms.join(" ")} ` : "";
   switch (candidate.primaryArea) {
     case "frontend":
@@ -467,6 +510,10 @@ function examplePhrase(candidate: CandidateSkill): string {
 }
 
 function workflowSourceStep(candidate: CandidateSkill): string {
+  if (candidate.learnedSurface) {
+    return `Update the source files in the learned ${candidate.learnedSurface.displayName} under ${candidate.learnedSurface.commonDirectory}, starting from the representative examples.`;
+  }
+
   switch (candidate.primaryArea) {
     case "frontend":
       return "Update the component, screen, route view, or style behavior using the existing local pattern.";

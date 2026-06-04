@@ -233,6 +233,9 @@ function scanAndCache(options: CliOptions): ScanResult {
     limit: options.limit
   });
   writeCache(scan.repoRoot, "scan-result.json", scan);
+  if (scan.repoLearning) {
+    writeCache(scan.repoRoot, "repo-learning.json", scan.repoLearning);
+  }
   return scan;
 }
 

@@ -5,7 +5,9 @@ import type { CommitMetadata, LikelyArea, PatternCount, RawCommit } from "../typ
 const TEST_PATTERNS = [
   /\.spec\.[jt]sx?$/i,
   /\.test\.[jt]sx?$/i,
+  /_(test|spec)\.[a-z0-9]+$/i,
   /(^|\/)__tests__(\/|$)/i,
+  /(^|\/)specs?(\/|$)/i,
   /(^|\/)(e2e|playwright|cypress)(\/|$)/i,
   /playwright\.config\.[jt]s$/i
 ];

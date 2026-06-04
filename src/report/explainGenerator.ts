@@ -23,6 +23,9 @@ function renderSkillExplanation(skill: CandidateSkill): string {
     `Naming confidence: ${Math.round(skill.namingConfidence * 100)}%`,
     `Rationale: ${skill.rationale}`,
     "",
+    "Learned surface:",
+    ...renderLearnedSurface(skill),
+    "",
     "Confidence factors:",
     ...renderList(skill.confidenceFactors),
     "",
@@ -61,6 +64,27 @@ function renderEvidenceCommit(commit: CandidateSkill["evidenceCommits"][number])
   const diffSignals = commit.diffSignals.length > 0 ? `; diff: ${commit.diffSignals.slice(0, 3).join(", ")}` : "";
   const pathSignals = commit.pathSignals.length > 0 ? `; path: ${commit.pathSignals.slice(0, 3).join(", ")}` : "";
   return `- ${commit.shortHash}: ${commit.message}${diffSignals}${pathSignals}`;
+}
+
+function renderLearnedSurface(skill: CandidateSkill): string[] {
+  const surface = skill.learnedSurface;
+  if (!surface) {
+    return ["- None. This candidate was not strongly mapped to a learned implementation surface."];
+  }
+
+  return [
+    `- Surface: ${surface.displayName}`,
+    `- Directory: ${surface.commonDirectory}`,
+    `- Surface confidence: ${Math.round(surface.confidence * 100)}%`,
+    `- Evidence commit match share: ${Math.round(surface.matchShare * 100)}%`,
+    `- Representative source files: ${surface.representativeFiles.slice(0, 5).join(", ") || "None"}`,
+    `- Co-changing tests: ${surface.coChangingTestFiles.slice(0, 5).join(", ") || "None"}`,
+    `- Co-changing config/docs: ${surface.coChangingConfigOrDocsFiles.slice(0, 5).join(", ") || "None"}`,
+    `- Validation commands: ${surface.validationCommands.join(", ") || "None"}`,
+    `- Role counts: ${Object.entries(surface.roleCounts).map(([role, count]) => `${role}=${count}`).join(", ")}`,
+    ...surface.coChangeEvidence.slice(0, 5).map((edge) => `- Co-change ${edge.weight} commits: ${edge.files.join(" + ")}`),
+    ...surface.reasons.map((reason) => `- ${reason}`)
+  ];
 }
 
 function renderList(items: string[]): string[] {
