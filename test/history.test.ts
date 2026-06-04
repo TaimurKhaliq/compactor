@@ -26,8 +26,10 @@ test("scanRepository reads local git history and changed files", () => {
     const scan = scanRepository({ repoPath: repoRoot, limit: 10 });
 
     assert.equal(scan.commitsAnalyzed, 2);
-    assert.equal(scan.commits[0]?.message, "Test orders grid");
-    assert.ok(scan.commits[0]?.changedFiles.includes("src/app/orders/orders-grid.component.spec.ts"));
+    const latestCommit = scan.commits[0];
+    assert.ok(latestCommit, "Expected latest scanned commit");
+    assert.equal(latestCommit.message, "Test orders grid");
+    assert.ok(latestCommit.changedFiles.includes("src/app/orders/orders-grid.component.spec.ts"));
     assert.ok(scan.repeatedPathPatterns.some((pattern) => pattern.pattern === "grid-table-files"));
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });

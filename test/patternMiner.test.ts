@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyCommit, collectRepeatedPathPatterns } from "../src/analysis/classifier.js";
 import { minePatterns } from "../src/analysis/patternMiner.js";
-import type { DiffSignal, ScanResult } from "../src/types.js";
+import type { CandidateSkill, DiffSignal, ScanResult } from "../src/types.js";
 import { diffSummaryWithSignals, emptyDiffSummary } from "./helpers.js";
 
 test("detects backend route, service, and test clusters", () => {
@@ -20,9 +20,12 @@ test("detects backend route, service, and test clusters", () => {
   ];
 
   const result = minePatterns(scan(commits, ["npm test"]));
-  const backend = result.candidates.find((candidate) => candidate.name === "Add or Update Backend API Feature");
+  const backend = requireCandidate(
+    result.candidates,
+    (candidate) => candidate.name === "Add or Update Backend API Feature",
+    "backend API candidate"
+  );
 
-  assert.ok(backend);
   assert.ok(backend.patternConfidence > 0.6);
   assert.ok(backend.namingConfidence > 0.8);
   assert.ok(backend.genericSignals.includes("api_route_changed"));
@@ -44,9 +47,12 @@ test("uses repeated domain terms for backend pattern names", () => {
   ];
 
   const result = minePatterns(scan(commits, ["npm test"]));
-  const backend = result.candidates.find((candidate) => candidate.genericCategory === "Backend API Feature");
+  const backend = requireCandidate(
+    result.candidates,
+    (candidate) => candidate.genericCategory === "Backend API Feature",
+    "backend API candidate"
+  );
 
-  assert.ok(backend);
   assert.equal(backend.name, "Add or Update Audit Reporting Backend API Feature");
   assert.deepEqual(backend.domainTerms, ["audit", "report"]);
   assert.ok(backend.namingReasons.some((reason) => reason.includes("domain terms used for name: audit, report")));
@@ -65,9 +71,12 @@ test("uses repeated domain terms for UI pattern names", () => {
   ];
 
   const result = minePatterns(scan(commits, ["npm test"]));
-  const ui = result.candidates.find((candidate) => candidate.genericCategory === "UI Component Pattern");
+  const ui = requireCandidate(
+    result.candidates,
+    (candidate) => candidate.genericCategory === "UI Component Pattern",
+    "UI component candidate"
+  );
 
-  assert.ok(ui);
   assert.equal(ui.name, "Add or Update Grid Table UI Component Pattern");
   assert.deepEqual(ui.domainTerms, ["grid", "table"]);
 });
@@ -87,9 +96,12 @@ test("filters noisy terms out of generated names", () => {
   ];
 
   const result = minePatterns(scan(commits, ["npm test"]));
-  const backend = result.candidates.find((candidate) => candidate.genericCategory === "Backend API Feature");
+  const backend = requireCandidate(
+    result.candidates,
+    (candidate) => candidate.genericCategory === "Backend API Feature",
+    "backend API candidate"
+  );
 
-  assert.ok(backend);
   assert.equal(backend.name, "Add or Update Backend API Feature");
   assert.deepEqual(backend.domainTerms, []);
   assert.ok(backend.rejectedNoisyTerms.includes("helper"));
@@ -104,9 +116,8 @@ test("falls back to generic names when domain terms are weak", () => {
   ];
 
   const result = minePatterns(scan(commits, []));
-  const docs = result.candidates[0];
+  const docs = requireCandidate(result.candidates, undefined, "documentation candidate");
 
-  assert.ok(docs);
   assert.equal(docs.name, "Update Documentation Pattern");
   assert.equal(docs.genericFallbackName, "Update Documentation Pattern");
   assert.deepEqual(docs.domainTerms, []);
@@ -139,9 +150,10 @@ test("raises naming confidence when domain terms repeat across commits", () => {
     ])
   ], ["npm test"]));
 
-  assert.ok(strong.candidates[0]);
-  assert.ok(weak.candidates[0]);
-  assert.ok(strong.candidates[0].namingConfidence > weak.candidates[0].namingConfidence);
+  const strongCandidate = requireCandidate(strong.candidates, undefined, "strong naming candidate");
+  const weakCandidate = requireCandidate(weak.candidates, undefined, "weak naming candidate");
+
+  assert.ok(strongCandidate.namingConfidence > weakCandidate.namingConfidence);
 });
 
 test("avoids false API labels when backend paths lack route diff signals", () => {
@@ -204,9 +216,11 @@ test("uses only discovered validation commands", () => {
   ];
 
   const result = minePatterns(scan(commits, ["npm test", "npm run typecheck"]));
-  assert.equal(result.candidates[0]?.name, "Add or Update CLI Feature");
-  assert.equal(result.candidates[0]?.genericCategory, "CLI Feature");
-  assert.deepEqual(result.candidates[0]?.suggestedValidationCommands, ["npm test", "npm run typecheck"]);
+  const cli = requireCandidate(result.candidates, undefined, "CLI candidate");
+
+  assert.equal(cli.name, "Add or Update CLI Feature");
+  assert.equal(cli.genericCategory, "CLI Feature");
+  assert.deepEqual(cli.suggestedValidationCommands, ["npm test", "npm run typecheck"]);
 });
 
 test("tracks naming confidence separately from pattern confidence", () => {
@@ -216,12 +230,21 @@ test("tracks naming confidence separately from pattern confidence", () => {
   ];
 
   const result = minePatterns(scan(commits, []));
-  const docs = result.candidates[0];
+  const docs = requireCandidate(result.candidates, undefined, "documentation candidate");
 
-  assert.ok(docs);
   assert.ok(docs.patternConfidence > 0.5);
   assert.ok(docs.namingConfidence < docs.patternConfidence);
 });
+
+function requireCandidate(
+  candidates: CandidateSkill[],
+  predicate?: (candidate: CandidateSkill) => boolean,
+  label = "candidate"
+): CandidateSkill {
+  const candidate = predicate ? candidates.find(predicate) : candidates[0];
+  assert.ok(candidate, `Expected ${label}`);
+  return candidate;
+}
 
 function commit(hash: string, message: string, changedFiles: string[], signals: DiffSignal[]) {
   return classifyCommit({

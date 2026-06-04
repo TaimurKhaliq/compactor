@@ -16,7 +16,7 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@types/node": "^20.14.10",
+    "@types/node": "^20.19.41",
     "typescript": "^5.5.3"
   }
 }
