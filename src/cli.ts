@@ -385,6 +385,12 @@ function scanAndCache(options: CliOptions): ScanResult {
   if (scan.repoLearning) {
     writeCache(scan.repoRoot, "repo-learning.json", scan.repoLearning);
   }
+  if (scan.fingerprints) {
+    writeCache(scan.repoRoot, "fingerprints.json", {
+      fingerprints: scan.fingerprints,
+      patternFamilies: scan.patternFamilies ?? []
+    });
+  }
   return scan;
 }
 

@@ -175,10 +175,15 @@ export function renderSkillMarkdown(candidate: CandidateSkill, metadata = create
     `Pattern confidence: ${formatConfidence(candidate.patternConfidence)}`,
     `Naming confidence: ${formatConfidence(candidate.namingConfidence)}`,
     ...(candidate.learnedSurface ? ["", "This skill is based on a learned implementation surface."] : []),
+    ...(candidate.patternFamily ? ["", "This skill is based on an implementation fingerprint pattern family."] : []),
+    "",
+    "## Generated from",
+    ...renderGeneratedFrom(candidate),
     "",
     "## When to use",
     renderWhenToUse(candidate),
     ...(candidate.learnedSurface ? ["", "## Learned surface", ...renderLearnedSurface(candidate)] : []),
+    ...(candidate.patternFamily ? ["", "## Pattern family", ...renderPatternFamily(candidate)] : []),
     "",
     "## Relevant examples",
     ...renderRelevantExamples(candidate),
@@ -305,6 +310,51 @@ function renderLearnedSurface(candidate: CandidateSkill): string[] {
   return lines;
 }
 
+function renderPatternFamily(candidate: CandidateSkill): string[] {
+  const family = candidate.patternFamily;
+  if (!family) {
+    return [];
+  }
+
+  const lines = [
+    `- Pattern Family: ${family.name}`,
+    `- Match confidence: ${formatConfidence(family.confidence)}`,
+    `- Files in family: ${family.fileCount}`,
+    `- Commits touching family files: ${family.commitCount}`,
+    `- Frameworks: ${family.frameworks.join(", ") || "None"}`,
+    `- Libraries: ${family.libraries.join(", ") || "None"}`,
+    `- Concepts: ${family.concepts.slice(0, 8).join(", ") || "None"}`,
+    "- Representative files:",
+    ...family.representativeFiles.slice(0, 8).map((file) => `  - ${file}`)
+  ];
+
+  if (family.similarityScores.length > 0) {
+    lines.push("- Similarity evidence:");
+    lines.push(...family.similarityScores.slice(0, 5).map((similarity) => `  - ${Math.round(similarity.score * 100)}%: ${similarity.files.join(" + ")} (${similarity.sharedFeatures.slice(0, 4).join(", ")})`));
+  }
+
+  return lines;
+}
+
+function renderGeneratedFrom(candidate: CandidateSkill): string[] {
+  const sources = candidate.generatedFrom ?? [
+    ...(candidate.learnedSurface ? ["learned_surface" as const] : []),
+    ...(candidate.patternFamily ? ["pattern_family" as const] : [])
+  ];
+  if (sources.length === 0) {
+    return ["- Commit history change-shape cluster"];
+  }
+
+  const lines: string[] = [];
+  if (sources.includes("learned_surface") && candidate.learnedSurface) {
+    lines.push(`- Learned Surface: ${candidate.learnedSurface.displayName} (${candidate.learnedSurface.commonDirectory})`);
+  }
+  if (sources.includes("pattern_family") && candidate.patternFamily) {
+    lines.push(`- Pattern Family: ${candidate.patternFamily.name}`);
+  }
+  return lines;
+}
+
 function learnedSurfaceValidationCommands(candidate: CandidateSkill): string[] {
   if (candidate.workflowProfile) {
     return unique([
@@ -361,6 +411,8 @@ function exampleFilePool(candidate: CandidateSkill): string[] {
   return unique([
     ...(candidate.learnedSurface?.representativeFiles ?? []),
     ...(candidate.learnedSurface?.coChangingTestFiles ?? []),
+    ...(candidate.patternFamily?.representativeFiles ?? []),
+    ...(candidate.patternFamily?.sourceFiles ?? []),
     ...candidate.commonFiles,
     ...candidate.evidenceCommits.flatMap((commit) => commit.changedFiles)
   ]);
@@ -377,6 +429,14 @@ function examplePriority(candidate: CandidateSkill, file: string): number {
     if (isRenderableSourceFile(lower) && lower.startsWith(`${surface.commonDirectory.toLowerCase()}/`)) return 0;
     if (isRenderableSourceFile(lower)) return 2;
     if (isRenderableTestFile(lower)) return 3;
+    return 4;
+  }
+
+  if (candidate.patternFamily) {
+    if (candidate.patternFamily.representativeFiles.includes(file) && isRenderableSourceFile(lower)) return 0;
+    if (candidate.patternFamily.sourceFiles.includes(file) && isRenderableSourceFile(lower)) return 1;
+    if (isRenderableTestFile(lower)) return 2;
+    if (isRenderableSourceFile(lower)) return 3;
     return 4;
   }
 

@@ -163,6 +163,52 @@ export interface RepoLearning {
   fileRoles: Record<string, FileRole>;
 }
 
+export interface SourceFingerprint {
+  path: string;
+  extension: string;
+  roles: string[];
+  frameworks: string[];
+  libraries: string[];
+  imports: string[];
+  exportedSymbols: string[];
+  classNames: string[];
+  interfaceTypeNames: string[];
+  functionNames: string[];
+  testNames: string[];
+  annotations: string[];
+  decorators: string[];
+  routeDefinitions: string[];
+  cliOptionDefinitions: string[];
+  schemaModelDefinitions: string[];
+  migrationOperations: string[];
+  componentTags: string[];
+  configKeys: string[];
+  concepts: string[];
+}
+
+export interface PatternFamilySimilarity {
+  files: [string, string];
+  score: number;
+  sharedFeatures: string[];
+}
+
+export interface PatternFamily {
+  id: string;
+  name: string;
+  representativeFiles: string[];
+  frameworks: string[];
+  libraries: string[];
+  concepts: string[];
+  roles: string[];
+  confidence: number;
+  fileCount: number;
+  commitCount: number;
+  sourceFiles: string[];
+  directories: string[];
+  similarityScores: PatternFamilySimilarity[];
+  reasons: string[];
+}
+
 export interface ScanResult {
   repoRoot: string;
   repositorySource?: "local" | "remote";
@@ -176,6 +222,8 @@ export interface ScanResult {
   commits: CommitMetadata[];
   repeatedPathPatterns: PatternCount[];
   repoLearning?: RepoLearning;
+  fingerprints?: SourceFingerprint[];
+  patternFamilies?: PatternFamily[];
 }
 
 export interface EvidenceCommit {
@@ -281,6 +329,7 @@ export interface CandidateSkill {
   confidenceFactors: string[];
   falsePositiveNotes: string[];
   rationale: string;
+  generatedFrom?: Array<"learned_surface" | "pattern_family">;
   learnedSurface?: {
     id: string;
     displayName: string;
@@ -297,6 +346,21 @@ export interface CandidateSkill {
     sourceTerms?: string[];
     coChangeEvidence: CoChangePair[];
     roleCounts: FileRoleCounts;
+    reasons: string[];
+  };
+  patternFamily?: {
+    id: string;
+    name: string;
+    confidence: number;
+    fileCount: number;
+    commitCount: number;
+    frameworks: string[];
+    libraries: string[];
+    concepts: string[];
+    roles: string[];
+    representativeFiles: string[];
+    sourceFiles: string[];
+    similarityScores: PatternFamilySimilarity[];
     reasons: string[];
   };
 }

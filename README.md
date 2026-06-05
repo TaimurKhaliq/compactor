@@ -5,7 +5,7 @@ Compactor is a local-first TypeScript CLI that mines a repository's git history 
 The MVP is deterministic and rule-based. It does not call an LLM API. The goal is to prove the pipeline:
 
 ```text
-git history -> bounded diff summaries -> repeated patterns -> candidate skills -> generated agent guidance
+git history + source fingerprints -> repeated patterns -> candidate skills -> generated agent guidance
 ```
 
 ## Why
@@ -142,6 +142,10 @@ compactor explain update-build-or-ci-configuration-ci-changed-config-changed htt
 The explanation includes:
 
 - evidence commits
+- learned surface evidence
+- fingerprint pattern-family evidence
+- frameworks and libraries detected in fingerprints
+- similarity scores and representative files
 - path signals
 - structured diff signals
 - domain terms used for naming
@@ -171,6 +175,8 @@ Captured metadata includes:
 - repeated file path patterns
 - generic path signals across frontend, backend, database, infrastructure, tests, and docs
 - generic diff signals such as added functions/classes/types, test cases, CLI commands, package scripts, SQL schema/index/query changes, and route/handler patterns visible in added lines
+- implementation fingerprints for source files, cached at `.compactor/cache/fingerprints.json`
+- implementation pattern families discovered from similar source files, even when those files never changed together
 
 ### `compactor mine`
 
@@ -181,12 +187,21 @@ compactor mine --limit 75
 compactor mine --json
 ```
 
-Compactor now mines generic change shapes rather than fixed repo-specific rules. It clusters commits by:
+Compactor now mines generic change shapes rather than fixed repo-specific rules. It learns both:
+
+- **Co-change surfaces**: files and directories that repeatedly change together.
+- **Implementation pattern families**: files that look structurally similar through imports, framework features, symbols, routes, CLI options, schema/model patterns, component tags, and concepts.
+
+It clusters commits by:
 
 - repeated generic signals, such as `api_route_changed`, `service_layer_changed`, `migration_changed`, `component_changed`, `ci_changed`, or `unit_test_changed`
 - overlapping directories and filenames
 - repeated commit-message and filename terms
 - lightweight framework/language hints
+
+It also clusters source files by fingerprint similarity. This catches patterns such as `user-grid.component.ts`, `profile-grid.component.ts`, and `account-grid.component.ts` that may never co-change but share the same implementation shape.
+
+Fingerprint detectors only extract neutral technology features. A single Angular, React, Spring, Rust, Prisma, or Kendo file does not become a skill by itself; Compactor only promotes repeated pattern families with enough similar files and confidence.
 
 Candidate names are proposed from evidence. Examples:
 
@@ -265,6 +280,7 @@ The report includes:
 
 - number of commits analyzed
 - candidate skills found
+- pattern families discovered
 - estimated token-saving rationale
 - top repeated patterns
 
@@ -292,6 +308,7 @@ src/git/packageScripts.ts
 src/git/repository.ts
 src/analysis/genericSignals.ts
 src/analysis/classifier.ts
+src/analysis/implementationFingerprints.ts
 src/analysis/detectors/
 src/analysis/patternMiner.ts
 src/skills/skillGenerator.ts

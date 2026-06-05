@@ -26,6 +26,9 @@ function renderSkillExplanation(skill: CandidateSkill): string {
     "Learned surface:",
     ...renderLearnedSurface(skill),
     "",
+    "Fingerprint pattern family:",
+    ...renderPatternFamily(skill),
+    "",
     "Confidence factors:",
     ...renderList(skill.confidenceFactors),
     "",
@@ -78,6 +81,26 @@ function renderSurfaceEvidenceFiltering(skill: CandidateSkill): string[] {
     `- Direct surface commits: ${skill.surfaceEvidenceCommits?.length ?? skill.evidenceCommits.length}`,
     `- Supporting commits: ${skill.supportingEvidenceCommits?.length ?? 0}`,
     `- Rejected noisy/unrelated commits: ${rejected}`
+  ];
+}
+
+function renderPatternFamily(skill: CandidateSkill): string[] {
+  const family = skill.patternFamily;
+  if (!family) {
+    return ["- None. This candidate was not generated from implementation fingerprint similarity."];
+  }
+
+  return [
+    `- Pattern Family: ${family.name}`,
+    `- Family confidence: ${Math.round(family.confidence * 100)}%`,
+    `- Files in family: ${family.fileCount}`,
+    `- Commits touching family files: ${family.commitCount}`,
+    `- Frameworks detected: ${family.frameworks.join(", ") || "None"}`,
+    `- Libraries detected: ${family.libraries.join(", ") || "None"}`,
+    `- Concepts detected: ${family.concepts.join(", ") || "None"}`,
+    `- Representative files: ${family.representativeFiles.slice(0, 8).join(", ") || "None"}`,
+    ...family.similarityScores.slice(0, 5).map((similarity) => `- Similarity ${Math.round(similarity.score * 100)}%: ${similarity.files.join(" + ")}; shared ${similarity.sharedFeatures.join(", ") || "features"}`),
+    ...family.reasons.map((reason) => `- ${reason}`)
   ];
 }
 

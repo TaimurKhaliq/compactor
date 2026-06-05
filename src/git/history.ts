@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { classifyCommit, collectRepeatedPathPatterns } from "../analysis/classifier.js";
+import { learnImplementationFingerprints } from "../analysis/implementationFingerprints.js";
 import { learnRepositoryPatterns } from "../analysis/repoLearning.js";
 import { parseUnifiedDiff } from "./diffParser.js";
 import { discoverValidationCommands, readPackageScripts } from "./packageScripts.js";
@@ -50,9 +51,13 @@ export function scanRepository(options: ScanRepositoryOptions = {}): ScanResult 
     repeatedPathPatterns: collectRepeatedPathPatterns(commits)
   };
 
+  const implementationLearning = learnImplementationFingerprints(repoRoot, commits);
+
   return {
     ...scanWithoutLearning,
-    repoLearning: learnRepositoryPatterns(scanWithoutLearning)
+    repoLearning: learnRepositoryPatterns(scanWithoutLearning),
+    fingerprints: implementationLearning.fingerprints,
+    patternFamilies: implementationLearning.patternFamilies
   };
 }
 

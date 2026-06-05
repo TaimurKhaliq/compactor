@@ -2,7 +2,7 @@ import { posix as path } from "node:path";
 import { emptyRoleCounts, inferFileRole, learnRepositoryPatterns } from "./repoLearning.js";
 import { extractPathSignals } from "./genericSignals.js";
 import { discoverValidationCommandsForFiles } from "../git/packageScripts.js";
-import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, FileDiffSummary, FileRoleCounts, GenericSignal, LearnedSurface, MiningResult, RepoLearning, ScanResult, SurfaceTaskKind, WorkflowAction, WorkflowActionSummary, WorkflowProfile, WorkflowStepEvidence } from "../types.js";
+import type { CandidateSkill, CommitMetadata, DiffSignal, EvidenceCommit, FileDiffSummary, FileRoleCounts, GenericSignal, LearnedSurface, MiningResult, PatternFamily, RepoLearning, ScanResult, SurfaceTaskKind, WorkflowAction, WorkflowActionSummary, WorkflowProfile, WorkflowStepEvidence } from "../types.js";
 
 interface WorkingCluster {
   commits: CommitMetadata[];
@@ -323,9 +323,12 @@ const DRAFT_MIN_EVIDENCE_COMMITS = 3;
 export function minePatterns(scan: ScanResult): MiningResult {
   const repoLearning = scan.repoLearning ?? learnRepositoryPatterns(scan);
   const clusters = buildClusters(scan.commits, repoLearning);
-  const mined = clusters
+  const surfaceCandidates = clusters
     .filter((cluster) => cluster.commits.length >= MIN_CLUSTER_COMMITS)
     .map((cluster, index) => buildCandidate(cluster, { ...scan, repoLearning }, index))
+    .sort((a, b) => b.patternConfidence - a.patternConfidence || b.namingConfidence - a.namingConfidence || a.name.localeCompare(b.name));
+  const familyCandidates = buildPatternFamilyCandidates(scan, surfaceCandidates.length);
+  const mined = [...surfaceCandidates, ...familyCandidates]
     .sort((a, b) => b.patternConfidence - a.patternConfidence || b.namingConfidence - a.namingConfidence || a.name.localeCompare(b.name));
   const deduped = dedupePromotedDrafts(mined);
   const candidates = ensureUniqueCandidateIds(deduped.candidates);
@@ -428,7 +431,25 @@ function cloneCandidate(candidate: CandidateSkill): CandidateSkill {
     confidenceFactors: [...candidate.confidenceFactors],
     falsePositiveNotes: [...candidate.falsePositiveNotes],
     promotionReasons: [...candidate.promotionReasons],
-    reviewNotes: [...candidate.reviewNotes]
+    reviewNotes: [...candidate.reviewNotes],
+    generatedFrom: candidate.generatedFrom ? [...candidate.generatedFrom] : undefined,
+    patternFamily: candidate.patternFamily
+      ? {
+          ...candidate.patternFamily,
+          frameworks: [...candidate.patternFamily.frameworks],
+          libraries: [...candidate.patternFamily.libraries],
+          concepts: [...candidate.patternFamily.concepts],
+          roles: [...candidate.patternFamily.roles],
+          representativeFiles: [...candidate.patternFamily.representativeFiles],
+          sourceFiles: [...candidate.patternFamily.sourceFiles],
+          similarityScores: candidate.patternFamily.similarityScores.map((similarity) => ({
+            ...similarity,
+            files: [...similarity.files] as [string, string],
+            sharedFeatures: [...similarity.sharedFeatures]
+          })),
+          reasons: [...candidate.patternFamily.reasons]
+        }
+      : undefined
   };
 }
 
@@ -1025,6 +1046,195 @@ function surfaceCoChangeEvidence(surface: LearnedSurfaceMatch): LearnedSurfaceMa
     .slice(0, 8);
 }
 
+function buildPatternFamilyCandidates(scan: ScanResult, indexOffset: number): CandidateSkill[] {
+  const families = (scan.patternFamilies ?? [])
+    .filter((family) => isStrongPatternFamily(family))
+    .slice(0, 20);
+
+  return families.map((family, index) => buildPatternFamilyCandidate(family, scan, indexOffset + index));
+}
+
+function isStrongPatternFamily(family: PatternFamily): boolean {
+  return family.fileCount >= 3 && family.confidence >= 0.68 && family.sourceFiles.some((file) => inferFileRole(file) === "source");
+}
+
+function buildPatternFamilyCandidate(family: PatternFamily, scan: ScanResult, index: number): CandidateSkill {
+  const commits = commitsForPatternFamily(scan.commits, family);
+  const evidenceCommits = commits.length > 0 ? commits : [];
+  const signals = genericSignalsForPatternFamily(family);
+  const primaryArea = primaryAreaForPatternFamily(family);
+  const validationCommands = unique([
+    ...discoverValidationCommandsForFiles(scan.repoRoot, family.sourceFiles),
+    ...scan.validationCommands
+  ]).slice(0, 5);
+  const workflowQuality = workflowQualityForPatternFamily(family, validationCommands);
+  const patternConfidence = Number(Math.min(0.98, family.confidence + (family.fileCount >= 4 ? 0.03 : 0)).toFixed(2));
+  const namingConfidence = Number(Math.min(0.96, family.confidence + 0.04).toFixed(2));
+  const promotionLevel = family.confidence >= 0.9 && family.fileCount >= 3 && workflowQuality >= 0.75
+    ? "agent_ready"
+    : "draft";
+  const name = skillNameForPatternFamily(family);
+  const id = uniqueSkillId(name, signals, index);
+  const commonDirectories = topValues(family.sourceFiles.map(directoryForFile), 6);
+  const familyEvidence = evidenceCommits.map((commit) => toEvidenceCommit(commit));
+
+  return {
+    id,
+    name,
+    taskDescription: taskDescriptionForPatternFamily(family, name),
+    outputType: "skill",
+    promotion_level: promotionLevel,
+    primaryArea,
+    primaryAreaShare: 1,
+    workflowQuality,
+    generatedArtifactEvidenceShare: 0,
+    promotionReasons: [
+      `Promoted from implementation fingerprint family ${family.name}.`,
+      `${family.fileCount} files share implementation-shape features with ${Math.round(family.confidence * 100)}% confidence.`,
+      promotionLevel === "draft"
+        ? "Generated as a draft because fingerprint-derived guidance should be reviewed before becoming trusted."
+        : "Generated as agent-ready because the family has high similarity confidence and enough workflow evidence."
+    ],
+    reviewNotes: [
+      "Review representative files to confirm the implementation shape is genuinely reusable.",
+      "Fingerprint families find similar files even when they never changed together."
+    ],
+    patternConfidence,
+    namingConfidence,
+    confidence: patternConfidence,
+    evidenceCommits: familyEvidence,
+    rawEvidenceCommitCount: evidenceCommits.length,
+    surfaceRelevantCommitCount: evidenceCommits.length,
+    rejectedEvidenceCommitCount: 0,
+    commonFiles: family.representativeFiles.slice(0, 8),
+    commonDirectories,
+    observedConventions: observedConventionsForPatternFamily(family),
+    observedChanges: observedChangesForPatternFamily(family),
+    workflowProfile: undefined,
+    suggestedValidationCommands: validationCommands,
+    genericSignals: signals,
+    repeatedTerms: unique([...family.concepts, ...family.roles, ...family.frameworks]).slice(0, 12),
+    domainTerms: family.concepts.slice(0, 6),
+    rejectedNoisyTerms: [],
+    genericCategory: genericCategoryForPatternFamily(family),
+    genericFallbackName: name,
+    namingReasons: [
+      `pattern family selected for name: ${family.name}`,
+      family.frameworks.length > 0 ? `frameworks detected in fingerprints: ${family.frameworks.join(", ")}` : "no framework was required for naming",
+      family.libraries.length > 0 ? `libraries detected in fingerprints: ${family.libraries.join(", ")}` : "no library was required for naming",
+      family.concepts.length > 0 ? `shared implementation concepts: ${family.concepts.slice(0, 6).join(", ")}` : "no strong shared concepts were detected"
+    ],
+    frameworkHints: family.frameworks,
+    matchedPatterns: signals,
+    pathSignals: family.sourceFiles.flatMap(extractPathSignals).filter((signal, index, values) => values.indexOf(signal) === index).slice(0, 12),
+    diffSignals: [],
+    confidenceFactors: [
+      `Pattern family discovered from ${family.fileCount} similar source files.`,
+      `Pattern family confidence: ${Math.round(family.confidence * 100)}%.`,
+      family.similarityScores.length > 0
+        ? `Strongest similarity: ${family.similarityScores[0]?.files.join(" + ")} at ${Math.round((family.similarityScores[0]?.score ?? 0) * 100)}%.`
+        : "Similarity was inferred from shared family features."
+    ],
+    falsePositiveNotes: [
+      "Fingerprint similarity can group files with similar technology usage but different intent.",
+      "Review the representative files before approving this skill."
+    ],
+    rationale: `Compactor grouped ${family.fileCount} source files into pattern family ${family.name} by implementation fingerprint similarity, independent of co-change history.`,
+    generatedFrom: ["pattern_family"],
+    patternFamily: {
+      id: family.id,
+      name: family.name,
+      confidence: family.confidence,
+      fileCount: family.fileCount,
+      commitCount: family.commitCount,
+      frameworks: family.frameworks,
+      libraries: family.libraries,
+      concepts: family.concepts,
+      roles: family.roles,
+      representativeFiles: family.representativeFiles,
+      sourceFiles: family.sourceFiles,
+      similarityScores: family.similarityScores,
+      reasons: family.reasons
+    }
+  };
+}
+
+function commitsForPatternFamily(commits: CommitMetadata[], family: PatternFamily): CommitMetadata[] {
+  const files = new Set(family.sourceFiles.map((file) => path.normalize(file)));
+  return commits.filter((commit) => commit.changedFiles.some((file) => files.has(path.normalize(file))));
+}
+
+function genericSignalsForPatternFamily(family: PatternFamily): GenericSignal[] {
+  const signals: GenericSignal[] = [];
+  const has = (value: string) => family.roles.includes(value) || family.concepts.includes(value);
+  if (has("ui") || has("component") || has("grid") || has("table")) signals.push("ui_changed", "component_changed");
+  if (has("api") || has("controller") || has("route") || has("rest")) signals.push("backend_changed", "api_route_changed", "controller_changed");
+  if (has("service")) signals.push("service_layer_changed");
+  if (has("repository")) signals.push("repository_or_dao_changed");
+  if (has("database") || has("migration") || has("schema") || has("model") || has("entity")) signals.push("db_changed", "model_or_entity_changed");
+  if (has("migration") || has("schema")) signals.push("migration_changed", "schema_changed");
+  if (has("cli") || has("command") || has("option") || has("flag")) signals.push("cli_command_changed");
+  return unique(signals).slice(0, 10);
+}
+
+function primaryAreaForPatternFamily(family: PatternFamily): PrimaryArea {
+  const has = (value: string) => family.roles.includes(value) || family.concepts.includes(value);
+  if (has("ui") || has("component") || has("grid") || has("table")) return "frontend";
+  if (has("cli") || has("command") || has("option") || has("flag")) return "cli";
+  if (has("api") || has("controller") || has("route") || has("rest")) return "backend";
+  if (has("database") || has("migration") || has("schema") || has("model") || has("entity")) return "db";
+  return "unknown";
+}
+
+function workflowQualityForPatternFamily(family: PatternFamily, validationCommands: string[]): number {
+  let score = 0.45;
+  if (family.fileCount >= 3) score += 0.15;
+  if (family.confidence >= 0.8) score += 0.15;
+  if (validationCommands.length > 0) score += 0.15;
+  if (family.concepts.length >= 2 || family.roles.length >= 2) score += 0.1;
+  return Number(Math.min(0.9, score).toFixed(2));
+}
+
+function skillNameForPatternFamily(family: PatternFamily): string {
+  const has = (value: string) => family.roles.includes(value) || family.concepts.includes(value) || family.name.toLowerCase().includes(value);
+  if (has("grid")) return "Add Grid Component";
+  if (has("table")) return "Add Table Component";
+  if (has("cli") || has("command")) return "Add CLI Command";
+  if (has("controller") || has("api") || has("route")) return "Add REST Controller";
+  if (has("migration") || has("schema")) return "Add Database Migration";
+  return `Update ${family.name.replace(/\s+Pattern$/, "")}`;
+}
+
+function taskDescriptionForPatternFamily(family: PatternFamily, name: string): string {
+  const directory = family.directories[0] ?? "the matching source area";
+  return `Use this when implementing ${name.toLowerCase()} work that matches the ${family.name} implementation family under ${directory}.`;
+}
+
+function genericCategoryForPatternFamily(family: PatternFamily): string {
+  const area = primaryAreaForPatternFamily(family);
+  if (area === "frontend") return "UI Implementation Family";
+  if (area === "backend") return "Backend Implementation Family";
+  if (area === "cli") return "CLI Implementation Family";
+  if (area === "db") return "Database Implementation Family";
+  return "Implementation Pattern Family";
+}
+
+function observedConventionsForPatternFamily(family: PatternFamily): string[] {
+  return [
+    `Similar implementation shape appears across ${family.fileCount} files.`,
+    family.frameworks.length > 0 ? `Shared frameworks: ${family.frameworks.join(", ")}.` : "No single framework was required for the family.",
+    family.libraries.length > 0 ? `Shared libraries: ${family.libraries.join(", ")}.` : "No single library was required for the family.",
+    family.concepts.length > 0 ? `Shared concepts: ${family.concepts.slice(0, 6).join(", ")}.` : "No dominant concepts were detected."
+  ];
+}
+
+function observedChangesForPatternFamily(family: PatternFamily): string[] {
+  return [
+    `Fingerprint family ${family.name} contains ${family.fileCount} source files.`,
+    ...family.similarityScores.slice(0, 4).map((similarity) => `Similarity ${Math.round(similarity.score * 100)}%: ${similarity.files.join(" + ")} (${similarity.sharedFeatures.slice(0, 4).join(", ")})`)
+  ];
+}
+
 function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number): CandidateSkill {
   const rawCommits = cluster.commits;
   const rawDominant = dominantSignals(cluster, 10);
@@ -1159,6 +1369,7 @@ function buildCandidate(cluster: WorkingCluster, scan: ScanResult, index: number
     rationale: learnedSurface
       ? `Compactor grouped ${rawCommits.length} broad-cluster commits around learned surface ${learnedSurface.displayName} (${learnedSurface.commonDirectory}); ${evidenceSplit?.relevantCommits.length ?? commits.length} surface-relevant commits were used for the skill.`
       : `Compactor grouped ${commits.length} commits with a repeated change shape: ${dominant.join(", ")}.`,
+    generatedFrom: learnedSurface ? ["learned_surface"] : undefined,
     learnedSurface
   };
 }

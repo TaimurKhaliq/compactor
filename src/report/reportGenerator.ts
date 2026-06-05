@@ -21,6 +21,7 @@ export function generateReport(scan: ScanResult, mining: MiningResult, options: 
     `Agent-ready skills: ${mining.candidates.filter((candidate) => candidate.promotion_level === "agent_ready").length}`,
     `Draft skills: ${mining.candidates.filter((candidate) => candidate.promotion_level === "draft").length}`,
     `Pattern candidates: ${mining.candidates.filter((candidate) => candidate.promotion_level === "pattern_candidate").length}`,
+    `Pattern families discovered: ${scan.patternFamilies?.length ?? 0}`,
     `Archived/deprecated skills: ${archivedSkillCount}`,
     `Merged duplicate drafts: ${mining.duplicateHandling?.mergedDuplicateDrafts ?? 0}`,
     `Suppressed duplicate drafts: ${mining.duplicateHandling?.suppressedDuplicateDrafts ?? 0}`,
@@ -29,10 +30,26 @@ export function generateReport(scan: ScanResult, mining: MiningResult, options: 
     "Top repeated patterns:",
     ...renderTopPatterns(scan),
     "",
+    "Top pattern families:",
+    ...renderTopPatternFamilies(scan),
+    "",
     "Candidates:",
     ...renderCandidateSkills(mining.candidates),
     ""
   ].join("\n");
+}
+
+function renderTopPatternFamilies(scan: ScanResult): string[] {
+  const families = scan.patternFamilies ?? [];
+  if (families.length === 0) {
+    return ["- No implementation fingerprint families discovered."];
+  }
+
+  return families.slice(0, 8).map((family) => {
+    const frameworks = family.frameworks.length > 0 ? `; frameworks: ${family.frameworks.join(", ")}` : "";
+    const libraries = family.libraries.length > 0 ? `; libraries: ${family.libraries.join(", ")}` : "";
+    return `- ${family.name}: ${family.fileCount} files, ${Math.round(family.confidence * 100)}% confidence${frameworks}${libraries}`;
+  });
 }
 
 function renderTokenRationale(repeatedOccurrences: number, estimatedTokens: number): string {
